@@ -772,6 +772,7 @@ void main(){
     bool mouse_captured = false;
     Uint32 last_tick = SDL_GetTicks();
 
+
     bool run = true;
     while (run) {
         Uint32 now = SDL_GetTicks();

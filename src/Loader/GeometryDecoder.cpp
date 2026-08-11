@@ -671,13 +671,13 @@ void DecodeRenderWareGeometry(const std::string& name, const uint8_t* payload, s
       size_t c = rootBody;
       while (c + 12 <= rootEnd) {
         const uint32_t ct = ru32(c), cs = ru32(c + 4);
-        if (ru32(c + 8) != 0x1C020065 || cs == 0 || c + 12 + cs > rootEnd)
+        if (cs == 0 || c + 12 + cs > rootEnd)
           break;
         if (ct == 0x1A) { // GeometryList -> Struct, then Geometry chunks
           size_t g = c + 12;
           while (g + 12 <= c + 12 + cs) {
             const uint32_t gt = ru32(g), gs = ru32(g + 4);
-            if (ru32(g + 8) != 0x1C020065 || gs == 0 || g + 12 + gs > c + 12 + cs)
+            if (gs == 0 || g + 12 + gs > c + 12 + cs)
               break;
             if (gt == 0x0F)
               collectFrom(g + 12, g + 12 + gs);
@@ -782,7 +782,7 @@ void DecodeRenderWareGeometry(const std::string& name, const uint8_t* payload, s
     bool hasSkin = false;
     for (size_t c = extBegin; c + 12 <= extEnd;) {
       const uint32_t ct = ru32(c), cs = ru32(c + 4);
-      if (ru32(c + 8) != 0x1C020065 || cs == 0 || c + 12 + cs > extEnd)
+      if (cs == 0 || c + 12 + cs > extEnd)
         break;
       if (ct == 0x050E) { binMesh = c + 12; binMeshEnd = c + 12 + cs; }
       else if (ct == 0x0510) { native = c + 12; nativeEnd = c + 12 + cs; }
@@ -875,11 +875,21 @@ void DecodeRenderWareGeometry(const std::string& name, const uint8_t* payload, s
       
       std::vector<uint8_t> boneIds;
       std::vector<float> boneWeights;
-      if (hasSkin && meshType == 0 && vifEnd + numIdx * 16 <= blockEnd) {
+      if (hasSkin) {
+          if (meshType != 0) {
+              std::fprintf(stderr, "Skipping weights: meshType is %u, not 0\n", meshType);
+          } else if (vifEnd + numIdx * 16 > blockEnd) {
+              std::fprintf(stderr, "Skipping weights: vifEnd + numIdx*16 (%zu + %u) > blockEnd (%zu)\n", vifEnd, numIdx*16, blockEnd);
+          }
+      }
+      
+      size_t weightRecords = (blockEnd > vifEnd) ? (blockEnd - vifEnd) / 16 : 0;
+
+      if (hasSkin && meshType == 0 && weightRecords > 0) {
           size_t wp = vifEnd;
-          boneIds.resize(numIdx * 4);
-          boneWeights.resize(numIdx * 4);
-          for (uint32_t v = 0; v < numIdx; ++v) {
+          boneIds.resize(weightRecords * 4);
+          boneWeights.resize(weightRecords * 4);
+          for (size_t v = 0; v < weightRecords; ++v) {
               for (int w = 0; w < 4; ++w) {
                   // The byte is the matrix's address in VU memory. A bone
                   // matrix spans four quadwords, so dividing by four gives the
@@ -917,7 +927,7 @@ void DecodeRenderWareGeometry(const std::string& name, const uint8_t* payload, s
         if (hasSkin && meshType == 0 && !boneWeights.empty()) {
             for (size_t v = 0; v < rawVerts.size(); ++v) {
                 const size_t wi = base + v;
-                if (wi >= numIdx) break;
+                if (wi >= boneWeights.size() / 4) break;
                 for (int w = 0; w < 4; ++w) {
                     rawVerts[v].boneIds[w] = boneIds[wi * 4 + w];
                     rawVerts[v].boneWeights[w] = boneWeights[wi * 4 + w];
@@ -985,7 +995,7 @@ void DecodeRenderWareGeometry(const std::string& name, const uint8_t* payload, s
       size_t st = 0, stEnd = 0;
       for (size_t c = a; c + 12 <= b;) {
         const uint32_t ct = ru32(c), cs = ru32(c + 4);
-        if (ru32(c + 8) != 0x1C020065 || cs == 0 || c + 12 + cs > b)
+        if (cs == 0 || c + 12 + cs > b)
           break;
         if (ct == 0x0001) { st = c + 12; stEnd = c + 12 + cs; break; }
         c += 12 + cs;
@@ -1071,7 +1081,7 @@ void DecodeRenderWareGeometry(const std::string& name, const uint8_t* payload, s
       bool sawNative = false;
       for (size_t c = a; c + 12 <= b;) {
         const uint32_t ct = ru32(c), cs = ru32(c + 4);
-        if (ru32(c + 8) != 0x1C020065 || cs == 0 || c + 12 + cs > b)
+        if (cs == 0 || c + 12 + cs > b)
           break;
         if (ct == 0x0003) {
           for (size_t x = c + 12; x + 12 <= c + 12 + cs;) {
@@ -1092,7 +1102,7 @@ void DecodeRenderWareGeometry(const std::string& name, const uint8_t* payload, s
       }
       for (size_t c = a; c + 12 <= b;) {
         const uint32_t ct = ru32(c), cs = ru32(c + 4);
-        if (ru32(c + 8) != 0x1C020065 || cs == 0 || c + 12 + cs > b)
+        if (cs == 0 || c + 12 + cs > b)
           break;
         if (ct == 0x0003)
           buildFromExtension(c + 12, c + 12 + cs, (int)si, localMats, localCols, localBlend);
@@ -1161,7 +1171,7 @@ void DecodeRenderWareGeometry(const std::string& name, const uint8_t* payload, s
       std::map<uint32_t, uint32_t> geomFrame;
       for (size_t c = rootBody; c + 12 <= rootEnd;) {
         const uint32_t ct = ru32(c), cs = ru32(c + 4);
-        if (ru32(c + 8) != 0x1C020065 || cs == 0 || c + 12 + cs > rootEnd)
+        if (cs == 0 || c + 12 + cs > rootEnd)
           break;
         if (ct == 0x0014 && ru32(c + 12) == 0x01)
           geomFrame[ru32(c + 28)] = ru32(c + 24); // struct: frameIdx, geomIdx
@@ -1171,12 +1181,12 @@ void DecodeRenderWareGeometry(const std::string& name, const uint8_t* payload, s
       uint32_t geomIndex = 0;
       for (size_t c = rootBody; c + 12 <= rootEnd;) {
         const uint32_t ct = ru32(c), cs = ru32(c + 4);
-        if (ru32(c + 8) != 0x1C020065 || cs == 0 || c + 12 + cs > rootEnd)
+        if (cs == 0 || c + 12 + cs > rootEnd)
           break;
         if (ct == 0x001A) {
           for (size_t g = c + 12; g + 12 <= c + 12 + cs;) {
             const uint32_t gt = ru32(g), gs = ru32(g + 4);
-            if (ru32(g + 8) != 0x1C020065 || gs == 0 || g + 12 + gs > c + 12 + cs)
+            if (gs == 0 || g + 12 + gs > c + 12 + cs)
               break;
             if (gt == 0x000F) {
               std::vector<std::string> geomMats;
@@ -1184,7 +1194,7 @@ void DecodeRenderWareGeometry(const std::string& name, const uint8_t* payload, s
               std::vector<uint32_t> geomBlend;
               for (size_t gc = g + 12; gc + 12 <= g + 12 + gs;) {
                 const uint32_t gct = ru32(gc), gcs = ru32(gc + 4);
-                if (ru32(gc + 8) != 0x1C020065 || gcs == 0 || gc + 12 + gcs > g + 12 + gs)
+                if (gcs == 0 || gc + 12 + gcs > g + 12 + gs)
                   break;
                 if (gct == 0x08) {
                   geomMats = parseMaterialList(gc);
@@ -1216,19 +1226,39 @@ void DecodeRenderWareGeometry(const std::string& name, const uint8_t* payload, s
                 if (cl && !cl->skeleton.bones.empty()) {
                   for (size_t gx = g + 12; gx + 12 <= g + 12 + gs;) {
                     const uint32_t xt = ru32(gx), xs = ru32(gx + 4);
-                    if (ru32(gx + 8) != 0x1C020065 || xs == 0 || gx + 12 + xs > g + 12 + gs)
+                    if (xs == 0 || gx + 12 + xs > g + 12 + gs)
                       break;
                     if (xt == 0x03) {
                       for (size_t sk = gx + 12; sk + 12 <= gx + 12 + xs;) {
                         const uint32_t st = ru32(sk), ss = ru32(sk + 4);
                         if (ss == 0 || sk + 12 + ss > gx + 12 + xs) break;
-                        if (st == 0x0116 && ss > 24 && ru32(sk + 12) == 0x01) {
-                          const size_t base = sk + 24;          // past inner Struct header
-                          const uint8_t used = payload[base + 5];
-                          if (used == 1) {
-                            const int want = payload[base + 8]; // usedBoneIds[0]
-                            for (size_t b = 0; b < cl->skeleton.bones.size(); b++)
-                              if (cl->skeleton.bones[b].trackIndex == want) { fi = (int)b; break; }
+                        if (st == 0x0116 && ss > 4) {
+                          if (ru32(sk + 12) == 0x01 && ss > 24) {
+                            const size_t base = sk + 24;          // past inner Struct header
+                            const uint8_t used = payload[base + 5];
+                            if (used == 1) {
+                              const int want = payload[base + 8]; // usedBoneIds[0]
+                              for (size_t b = 0; b < cl->skeleton.bones.size(); b++)
+                                if (cl->skeleton.bones[b].trackIndex == want) { fi = (int)b; break; }
+                            }
+                          } else {
+                            // Custom Climax format: raw bone IDs directly in the chunk.
+                            // Search the first few bytes for a non-zero bone ID.
+                            int want = -1;
+                            for (size_t i = 0; i < 32 && i + 24 < ss; ++i) {
+                                if (payload[sk + 24 + i] != 0) {
+                                    want = payload[sk + 24 + i];
+                                    break;
+                                }
+                            }
+                            if (want != -1) {
+                              for (size_t b = 0; b < cl->skeleton.bones.size(); b++) {
+                                if (cl->skeleton.bones[b].trackIndex == want) { 
+                                    fi = (int)b; 
+                                    break; 
+                                }
+                              }
+                            }
                           }
                         }
                         sk += 12 + ss;
