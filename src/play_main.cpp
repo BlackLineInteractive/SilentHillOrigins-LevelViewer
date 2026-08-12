@@ -219,6 +219,34 @@ std::string ResolveTextureName(std::string name, const char *mode) {
 // For each JPEG, looks back up to 128 bytes for a null-terminated name string
 // and uploads the decoded image into `textures` using the name without its
 // extension, so ResolveTextureName("sho_aspect_pw.jpg") finds it.
+// Decodes one JPEG blob into a GL texture. Shared by the Startup container scan
+// and by the standalone entries -- splash_p4.jpg is its own entry in SH.ARC, not
+// part of Startup, so it needs the same decode without the name-scanning.
+static GLuint MakeTextureFromJpeg(const uint8_t *data, size_t len,
+                                  int &wOut, int &hOut) {
+    SDL_RWops *rw = SDL_RWFromConstMem(data, (int)len);
+    SDL_Surface *surf = IMG_Load_RW(rw, 1);
+    if (!surf) return 0;
+    SDL_Surface *rgba = SDL_ConvertSurfaceFormat(surf, SDL_PIXELFORMAT_RGBA32, 0);
+    SDL_FreeSurface(surf);
+    if (!rgba) return 0;
+    GLuint id = 0;
+    glGenTextures(1, &id);
+    glBindTexture(GL_TEXTURE_2D, id);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, rgba->w, rgba->h, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, rgba->pixels);
+    glGenerateMipmap(GL_TEXTURE_2D);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    // Read before freeing -- reading rgba->w after SDL_FreeSurface printed
+    // "0x0" for every background until it was fixed.
+    wOut = rgba->w; hOut = rgba->h;
+    SDL_FreeSurface(rgba);
+    return id;
+}
+
 static void LoadStartupJpegs(const std::vector<uint8_t> &buf,
                               std::map<std::string, GLuint> &textures,
                               bool checkOnly) {
@@ -267,37 +295,12 @@ static void LoadStartupJpegs(const std::vector<uint8_t> &buf,
 
         if (!key.empty()) {
             if (!checkOnly && textures.find(key) == textures.end()) {
-                SDL_RWops *rw = SDL_RWFromConstMem(d + pos, (int)jpegLen);
-                SDL_Surface *surf = IMG_Load_RW(rw, 1);
-                if (surf) {
-                    SDL_Surface *rgba = SDL_ConvertSurfaceFormat(
-                        surf, SDL_PIXELFORMAT_RGBA32, 0);
-                    SDL_FreeSurface(surf);
-                    if (rgba) {
-                        GLuint id = 0;
-                        glGenTextures(1, &id);
-                        glBindTexture(GL_TEXTURE_2D, id);
-                        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
-                                     rgba->w, rgba->h, 0,
-                                     GL_RGBA, GL_UNSIGNED_BYTE, rgba->pixels);
-                        glGenerateMipmap(GL_TEXTURE_2D);
-                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
-                                        GL_LINEAR_MIPMAP_LINEAR);
-                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,
-                                        GL_LINEAR);
-                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S,
-                                        GL_CLAMP_TO_EDGE);
-                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,
-                                        GL_CLAMP_TO_EDGE);
-                        // Read before freeing: this printed "0x0" for every
-                        // background before the fix -- rgba->w/h off a surface
-                        // already handed to SDL_FreeSurface.
-                        const int rw = rgba->w, rh = rgba->h;
-                        SDL_FreeSurface(rgba);
-                        textures[key] = id;
-                        std::fprintf(stderr, "[play] bg '%s' %dx%d\n",
-                                     key.c_str(), rw, rh);
-                    }
+                int jw = 0, jh = 0;
+                const GLuint id = MakeTextureFromJpeg(d + pos, jpegLen, jw, jh);
+                if (id) {
+                    textures[key] = id;
+                    std::fprintf(stderr, "[play] bg '%s' %dx%d\n",
+                                 key.c_str(), jw, jh);
                 } else {
                     std::fprintf(stderr, "[play] IMG failed '%s': %s\n",
                                  key.c_str(), IMG_GetError());
@@ -417,9 +420,13 @@ int main(int argc, char **argv) {
     // half is worth testing on its own: it is the half that can be wrong
     // quietly, and it is the half a build machine can run.
     bool checkOnly = false;
+    std::string dumpEntry;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--check") == 0) checkOnly = true;
         else if (std::strcmp(argv[i], "--movies") == 0 && i + 1 < argc) moviesDir = argv[++i];
+        // Writes one archive entry to stdout verbatim. The game reads its
+        // screens out of SH.ARC, so anything worth looking at is in there.
+        else if (std::strcmp(argv[i], "--dump") == 0 && i + 1 < argc) dumpEntry = argv[++i];
         else arcPath = argv[i];
     }
 
@@ -514,23 +521,82 @@ int main(int argc, char **argv) {
         LoadStartupJpegs(buf, textures, checkOnly);
     }
 
+    // The copyright plate is a single JPEG, its own entry in SH.ARC rather than
+    // part of Startup: the logo and the whole copyright block are baked into the
+    // picture, so there is no wording to supply. Only 4:3 variants ship -- p4
+    // for PAL, n4 for NTSC, n4Jap -- because it is shown before the player has
+    // been asked about the aspect.
+    for (const char *n : {"splash_p4", "splash_n4"}) {
+        const std::string key = n;
+        if (textures.count(key) || !ReadEntry(arc, (key + ".jpg").c_str(), buf))
+            continue;
+        // The entry wraps the JPEG in a section header; the picture starts at
+        // the SOI marker.
+        size_t a = 0;
+        while (a + 1 < buf.size() && !(buf[a] == 0xFF && buf[a + 1] == 0xD8)) ++a;
+        if (a + 1 >= buf.size()) continue;
+        if (checkOnly) { textures[key] = 1; std::fprintf(stderr, "[play] splash '%s'\n", key.c_str()); continue; }
+        int jw = 0, jh = 0;
+        if (const GLuint id = MakeTextureFromJpeg(buf.data() + a, buf.size() - a, jw, jh)) {
+            textures[key] = id;
+            std::fprintf(stderr, "[play] splash '%s' %dx%d\n", key.c_str(), jw, jh);
+        }
+    }
+
+    if (!dumpEntry.empty()) {
+        if (!ReadEntry(arc, dumpEntry.c_str(), buf)) {
+            std::fprintf(stderr, "[play] %s: not in the archive\n", dumpEntry.c_str());
+            return 1;
+        }
+        std::fwrite(buf.data(), 1, buf.size(), stdout);
+        return 0;
+    }
+
     std::vector<std::unique_ptr<UI::Element>> owned;
     std::vector<std::pair<std::string, const UI::Element *>> screens;
-    for (const char *name : {"mainmenu", "newgame", "gameoptions", "pausemenu"}) {
-        if (!ReadEntry(arc, (std::string(name) + ".xml").c_str(), buf))
+    // `bootmenu` is the screen the game puts up first. It is an entry in
+    // SH.ARC like every other screen -- there is nothing to reconstruct and
+    // nothing to type in by hand.
+    const UI::Element *bootScreen = nullptr;
+    for (const char *name : {"bootmenu", "mainmenu", "newgame", "gameoptions",
+                             "pausemenu"}) {
+        // Every step here used to fail silently, so a screen that did not load
+        // was indistinguishable from one that loaded empty.
+        if (!ReadEntry(arc, (std::string(name) + ".xml").c_str(), buf)) {
+            std::fprintf(stderr, "[play] %s.xml: not in the archive\n", name);
             continue;
+        }
         auto root = std::make_unique<UI::Element>();
         std::string err;
         if (!UI::ParseXml((const char *)buf.data(), buf.size(), *root, &err)) {
             std::fprintf(stderr, "[play] %s.xml: %s\n", name, err.c_str());
             continue;
         }
-        if (const UI::Element *scr = root->Find("SCREEN"))
+        const UI::Element *scr = root->Find("SCREEN");
+        if (!scr) {
+            std::fprintf(stderr, "[play] %s.xml: parsed, but no <SCREEN> (root <%s>, %zu children)\n",
+                         name, root->tag.c_str(), root->children.size());
+        } else {
             screens.emplace_back(name, scr);
+            if (std::string(name) == "bootmenu")
+                bootScreen = scr;
+        }
         owned.push_back(std::move(root));
     }
     std::fprintf(stderr, "[play] %zu screens, %zu strings, %zu glyphs, %zu textures\n",
                  screens.size(), strings.Count(), font.Glyphs().size(), textures.size());
+    // The front end asks for text at sizes 16 and 14 (DAT_00338A3C /
+    // DAT_00338A40). Those are heights in the 512x448 space, so the scale that
+    // turns a glyph into one of them depends on what the font's own glyphs
+    // measure -- take it from the font instead of assuming a number.
+    float kFontNativeH = 16.0f;
+    {
+        int tallest = 0;
+        for (const UI::Glyph &g : font.Glyphs())
+            if ((int)g.height > tallest) tallest = (int)g.height;
+        if (tallest > 0) kFontNativeH = (float)tallest;
+        std::fprintf(stderr, "[play] font native height %d px\n", tallest);
+    }
 
     // Draws a line and returns its width, so the same code can centre it by
     // measuring first. Kerning comes from the font's own table.
@@ -739,9 +805,17 @@ int main(int argc, char **argv) {
         const float sx = (float)w / (wide ? kAuthorW : 640.0f);
         const float sy = (float)h / (wide ? kAuthorH : 480.0f);
 
+        const UI::Element *scr = nullptr;
+        std::string activeId;
         if (front.Stage() == Game::BootStage::MainMenu) {
-            const UI::Element *scr = front.Menu().Screen();
-            if (scr) {
+            scr = front.Menu().Screen();
+            activeId = front.Menu().ActiveId();
+        } else if (front.Stage() == Game::BootStage::Loading) {
+            scr = bootScreen;
+        }
+
+        if (scr) {
+            {
                 // `bgmovie="Menu"` is what the screen actually asks for; the
                 // static `bgtexture` (when a screen has one at all -- mainmenu
                 // does not) is the fallback for when no decoder is built in.
@@ -772,7 +846,7 @@ int main(int argc, char **argv) {
                     const float bw = b.Float("width") * sx;
                     const float bh = b.Float("height") * sy;
 
-                    const bool active = b.Attr("id") == front.Menu().ActiveId();
+                    const bool active = !activeId.empty() && b.Attr("id") == activeId;
                     const float k = active ? 1.0f : 0.5f;
 
                     // Art, if the element has any. Drawing a filled rectangle
@@ -848,6 +922,48 @@ int main(int argc, char **argv) {
                 return true;
             };
 
+            // The rect `fullscreen` just drew into, so that anything laid on top
+            // of a backdrop lands in the same place the backdrop did.
+            auto uiRect = [&](float &rx, float &ry, float &rw, float &rh) {
+                const float winAR = (float)w / (float)h;
+                if (winAR >= displayAR) {
+                    rh = (float)h; rw = rh * displayAR;
+                    ry = 0.0f;     rx = ((float)w - rw) * 0.5f;
+                } else {
+                    rw = (float)w; rh = rw / displayAR;
+                    rx = 0.0f;     ry = ((float)h - rh) * 0.5f;
+                }
+            };
+
+            // Maps the coordinates the game's own drawing code uses onto that
+            // rect. The front end is authored against the PS2's 512x448 PAL
+            // framebuffer -- 512 is not a guess, the flag row in FUN_00151918
+            // runs from x=32 to x=480 and is visibly centred.
+            auto uiQuad = [&](float ux, float uy, float uw, float uh, GLuint id,
+                              float r, float g, float b, float a) {
+                if (!id) return;
+                float rx, ry, rw, rh;
+                uiRect(rx, ry, rw, rh);
+                const float kx = rw / 512.0f, ky = rh / 448.0f;
+                painter.Quad(rx + ux * kx, ry + uy * ky, uw * kx, uh * ky,
+                             id, r, g, b, a);
+            };
+
+            // Centres a string inside a rect given in the game's 512x448 space,
+            // at one of the font sizes the front end asks for.
+            auto uiText = [&](float ux, float uy, float uw, float uh, float size,
+                              const std::string &t, float r, float g, float b, float a) {
+                if (t.empty()) return;
+                float rx, ry, rw, rh;
+                uiRect(rx, ry, rw, rh);
+                const float px = rw / 512.0f, py = rh / 448.0f;
+                const float scale = size * py / kFontNativeH;
+                const float wpx = drawText(0, 0, scale, t, 0, 0, 0, 0, true);
+                drawText(rx + (ux + uw * 0.5f) * px - wpx * 0.5f,
+                         ry + (uy + uh * 0.5f) * py + size * py * 0.35f,
+                         scale, t, r, g, b, a, false);
+            };
+
             // Same fit as `fullscreen`, but for a decoded video frame -- its
             // own GLuint, not one looked up in `textures` by name -- letterboxed
             // to the clip's real decoded size rather than the display aspect,
@@ -892,46 +1008,67 @@ int main(int argc, char **argv) {
                 }
                 break;
             }
-            case Game::BootStage::AspectSelect: {
-                // The background carries the wording; the choice is left/right.
-                fullscreen(std::string("sho_aspect_") + texMode);
-                const float bw = w * 0.16f, bh = bw * 0.62f;
-                for (int i = 0; i < 2; ++i) {
-                    const bool sel = (i == 1) == front.widescreen;
-                    const float bx = cx + (i == 0 ? -bw * 1.3f : bw * 0.3f);
-                    const float by = h * 0.62f;
-                    if (const GLuint f = tex("sho_flg_sel"); f && sel)
-                        painter.Quad(bx - 6, by - 6, bw + 12, bh + 12, f, 1, 1, 1, 1);
-                    const float k = sel ? 1.0f : 0.4f;
-                    centre(bx + bw * 0.5f, by + bh * 0.7f, sc * 0.9f,
-                           i == 0 ? "4:3" : "16:9", k, k, k, 1.0f);
-                }
+            case Game::BootStage::Loading:
+                // splash_p4.jpg carries the logo and the copyright block baked
+                // in; "loading" is not part of the picture, it is the string
+                // `loading` drawn over it. Its position is the one thing here
+                // still eyeballed -- this screen's drawing code has not been
+                // found, so there are no coordinates to copy.
+                fullscreen("splash_p4", 4.0f / 3.0f);
+                uiText(0, 268, 512, 32, 16.0f, strings.Text("loading"),
+                       1.0f, 1.0f, 1.0f, 1.0f);
                 break;
-            }
+
             case Game::BootStage::LanguageSelect: {
                 fullscreen(std::string("sho_lang_bd_") + texMode);
 
-                // Six flags in a row. Their coordinates are not in the data --
-                // this screen is built in code, so nothing in the 40 XML files
-                // describes it -- so the layout here is mine, not the game's.
+                // The layout is the game's, out of FUN_00151918: five 80x60
+                // quads on one line, first at (32,192), 92 apart. Selected is
+                // drawn white and the rest at 0xC8505050 -- the original tints
+                // the flag itself rather than putting a frame around it, so
+                // there is no sho_flg_sel here.
+                const Game::FlagRowLayout row = Game::LanguageRow();
                 const int n = Game::LanguageCount();
-                const float fw = w * 0.11f, fh = fw * 0.62f;
-                const float gap = fw * 0.28f;
-                const float total = n * fw + (n - 1) * gap;
-                const float y = h * 0.55f;
                 for (int i = 0; i < n; ++i) {
                     const auto lang = (Game::Language)i;
                     const bool sel = i == front.languageIndex;
-                    const float x = cx - total * 0.5f + i * (fw + gap);
-                    std::string name = Game::LanguageFlag(lang);
-                    if (sel) name += "_h";
-                    GLuint id = tex(name);
-                    if (!id) id = tex(Game::LanguageFlag(lang));
-                    if (id) painter.Quad(x, y, fw, fh, id, 1, 1, 1, 1);
+                    GLuint id = tex(Game::LanguageFlag(lang));
+                    // Some sets ship a pre-lit "_h" variant; prefer it when the
+                    // entry is selected, and fall back to tinting.
                     if (sel)
-                        if (const GLuint f = tex("sho_flg_sel"))
-                            painter.Quad(x - fw * 0.06f, y - fh * 0.09f,
-                                         fw * 1.12f, fh * 1.18f, f, 1, 1, 1, 1);
+                        if (const GLuint hi = tex(std::string(Game::LanguageFlag(lang)) + "_h"))
+                            id = hi;
+                    const float k = sel ? 1.0f : 0x50 / 255.0f;
+                    const float a = sel ? 1.0f : 0xC8 / 255.0f;
+                    uiQuad(row.x + i * row.step, row.y, row.w, row.h, id, k, k, k, a);
+                }
+                break;
+            }
+
+            case Game::BootStage::AspectSelect: {
+                // Two entries, one under the other, and they are *text*:
+                // FUN_00151fb8 passes `display_4x3` and `display_ws` through the
+                // string table rather than looking up a texture. Same two
+                // colours as the flag row.
+                fullscreen(std::string("sho_aspect_") + texMode);
+                // Every word here is the game's. FUN_00151fb8 passes the string
+                // id at 0x6929E0 -- `display_title` -- for the heading, and the
+                // two entries are `display_4x3` and `display_ws` through the
+                // same string table. Typing "4:3" and "16:9" in by hand was
+                // wrong even when the letters happened to come out the same.
+                // Coordinates out of .data, not out of my head: the heading
+                // rect is 0x00338A48 = (0,128,512,32) at size 0x00338A3C = 16,
+                // the list rect is 0x00338AA8 = (0,192,512,32) at size
+                // 0x00338A40 = 14, and FUN_00151fb8 advances y by that size
+                // twice per row -- 28.
+                uiText(0, 128, 512, 32, 16.0f, strings.Text("display_title"),
+                       1.0f, 1.0f, 1.0f, 1.0f);
+                for (int i = 0; i < 2; ++i) {
+                    const bool sel = (i == 1) == front.widescreen;
+                    const float k = sel ? 1.0f : 0x50 / 255.0f;
+                    uiText(0, 192.0f + i * 28.0f, 512, 32, 14.0f,
+                           strings.Text(i == 0 ? "display_4x3" : "display_ws"),
+                           k, k, k, sel ? 1.0f : 0xC8 / 255.0f);
                 }
                 break;
             }

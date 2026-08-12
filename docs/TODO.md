@@ -531,6 +531,54 @@ diagnosed.
 
 `CFogConfig`, one instance per level, visible in the type table and not read.
 
+### 6b. The front end must come from SLES, not from the XML alone
+
+**The current `climax-play` boot sequence is wrong and should not be trusted.**
+It was written by reading the 40 UI XML files and inventing an order around
+them — `Logo → AspectSelect → LanguageSelect → MainMenu` — and the flag row's
+layout, the stage order and the timings are all guesses. The XML describes each
+*screen*; it does not describe the *sequence*, which lives in the executable.
+
+Confirmed the sequence really is in `SLES_551.47`, as a data table in `.data`:
+
+```
+0x00338A28  -> "Logo"
+0x00338A5C  -> "sho_flg_GB"     0x00338A64  1
+0x00338A68  -> "sho_flg_FR"     0x00338A70  2
+0x00338A74  -> "sho_flg_IT"     0x00338A7C  3
+0x00338A80  -> "sho_flg_DE"     0x00338A88  4
+0x00338A8C  -> "sho_flg_ES"
+0x00338A98  -> "display_4x3"
+0x00338AA0  -> "display_ws"     0x00338AA4  1
+```
+
+Both handlers that walk these tables are now decompiled, and the front end has
+been rewritten to match. What they say:
+
+* **`FUN_00151918` — the flag row.** `do { ... } while (iVar4 < 5)`: five
+  entries, walked from `0x00338A5C` with a stride of 12, order GB FR IT DE ES.
+  Layout is literal in the code — 80x60 quads, the first at (32,192), each
+  92 px further along in x with y unchanged, so it is one horizontal row.
+  Selected is drawn `0xFFFFFFFF` and the rest `0xC8505050`; the original tints
+  the flag itself rather than framing it. The header string above the row comes
+  from `FUN_001f3640()`, i.e. the current language's own name.
+* **`FUN_00151fb8` — the aspect list.** Two entries stepping down in y, and they
+  are *text*: `display_4x3` and `display_ws` go through `FUN_001f36e8`, the
+  string-table lookup, not a texture lookup. Same two colours.
+* **`FUN_00152250` ("Logo") and `FUN_001521e8` are 8-byte stubs.** Those stages
+  draw nothing per frame — the movie and the copyright plate are put up
+  elsewhere — which is why searching for logo drawing code found nothing.
+
+The stage order is *not* in the table; the state index is written from outside
+it. It is taken from the retail game on screen: copyright plate -> language ->
+aspect -> logo -> menu. `climax-play --check` prints exactly that.
+
+Still open here: whoever writes `obj + 8` (the state index) and `obj + 0xc` (the
+cursor) — that is where the "asked once, then remembered" behaviour lives, and
+`FrontEnd::NextStage` currently reproduces it by assumption rather than by
+reading it. The 512x448 authored space that `uiQuad` maps onto is inferred from
+the row spanning x=32..480, not read.
+
 ### 7a. Video — playing, audio still open
 
 `MOVIES/*.PSS` (58 files, 1.7 GB) is converted by `tools/convert_movies.py` to
@@ -611,3 +659,60 @@ What the game adds on top, and this does not yet, is a latch: the character
 holds his existing world direction until the stick is re-centred, so a cut
 mid-stride does not immediately spin him. Worth adding as an option rather than
 a replacement — the reversal itself is not a bug to fix.
+
+### 6c. The real front-end state machine, read from the executable
+
+Full decompilation now exists: `decomp/sles_r5900/` (7698 functions, index in
+`decomp/sles_r5900_index.tsv`). The earlier 464-function set under
+`decomp/sho_sles_out/` is the HandleAttributes call-graph closure only, and it
+does not contain the front end at all.
+
+**The critical fix was the processor.** Ghidra's `MIPS:LE:32:default` cannot
+decode Emotion Engine MMI instructions, so front-end functions decompiled to
+three lines of `halt_baddata()` — which is why every earlier attempt at the
+boot order was guesswork. Re-importing with `r5900:LE:32:default` (the
+`ghidra-emotionengine-reloaded` extension, already installed) took the failure
+count from many to **zero**, and the function count from 5807 to 7698.
+
+    analyzeHeadless <proj> SHO_R5900 -import game-iso/SHO/SLES_551.47 \
+        -processor "r5900:LE:32:default"
+    analyzeHeadless <proj> SHO_R5900 -process SLES_551.47 -noanalysis \
+        -scriptPath ./tools \
+        -postScript GhidraDecompileEverything.java <outDir> <indexFile>
+
+The dispatcher is `FUN_00151d60`:
+
+```c
+if (*(int *)(param_1 + 0x10) == 0) {
+    switch (*(undefined4 *)(&DAT_00338a00 + *(int *)(param_1 + 8) * 0xc)) {
+    case 0: FUN_00151918(param_1); break;   // 
+    case 1: FUN_00151fb8(param_1); break;   // aspect select, 4:3 / 16:9
+    case 2: FUN_00152250(param_1);          // logo -- NOTE: no break,
+    case 4: break;                          //   deliberately falls through
+    case 3: FUN_001521e8(param_1); break;
+    }
+}
+```
+
+State records are **12 bytes** at `0x00338A00`, indexed by `obj + 8`; the first
+word is the `kind` the switch selects on, and `obj + 0x10` gates the whole
+thing. Observed rows:
+
+    [0] kind 0                      [3] kind 2, "Logo"
+    [1] kind 3                      [4] kind 4  (terminal)
+    [2] kind 1  (aspect select)
+
+Two things this proves the current `Game::FrontEnd` gets structurally wrong:
+
+* **The order is data, not an enum.** `BootStage` hardcodes a sequence in C++;
+  the game walks a table and dispatches on a `kind` field, and `Logo` is state
+  3 rather than the first.
+* **`case 2` falls through to `case 4` on purpose.** No amount of reasoning
+  about "what a boot sequence should do" would produce that.
+
+`FUN_00151fb8` is the aspect-select drawer and confirms the language table
+beside it: **five flags, GB FR IT DE ES**, not the six `climax-play` invents.
+
+Next: read `FUN_00151918`, `FUN_00152250`, `FUN_001521e8` and whoever writes
+`obj + 8`, then replace `Game::FrontEnd`'s enum with the same table-driven
+dispatch against our renderer.

@@ -9,12 +9,12 @@
 // Core/UI/ScreenDef.h -- so this holds only what the data does not: the order
 // of the boot stages, and how a button press moves between elements.
 //
-// Where the order came from: Origins' executable carries the strings `Logo`,
-// `Title` and `BootMenu`, and Ghost Rider -- unstripped -- has an object called
-// `..._Objects_FrontEnd_BootSequence` alongside `Warnings`,
-// `LanguageSelectionScreen` and `AttractMode`. Origins' archive holds 88 object
-// classes and none of them are front-end, so in this game the sequence is code
-// and this is a reconstruction of it, not a reading.
+// Where the order came from: the front end is code, not data -- Origins' archive
+// holds 88 object classes and not one of them is front-end -- so it was read out
+// of the executable. `decomp/sles_r5900/` holds every function in SLES_551.47
+// decompiled with the r5900 processor; `FUN_00151d60` is the dispatcher,
+// `FUN_00151918` draws the flags and `FUN_00151fb8` the aspect list, and the
+// tables they walk live at 0x00338A00 and 0x00338A5C. See docs/TODO.md §6c.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include <string>
@@ -25,23 +25,35 @@
 namespace ClimaxEngine {
 namespace Game {
 
+// The boot sequence, in the order the retail game actually runs it.
+//
+// Not invented: `FUN_00151d60` in `decomp/sles_r5900/` dispatches on a 12-byte
+// state record at `0x00338A00`, and the handlers it reaches are
+// `FUN_00151918` (the flag list), `FUN_00151fb8` (the aspect list) and
+// `FUN_00152250` ("Logo"). Confirmed against the retail game on screen:
+// copyright/loading, then language, then aspect, then the logo movie, then the
+// menu.
+//
+// An earlier version of this enum had Logo first and language last. That was
+// reconstructed from the UI XML, which describes screens but says nothing about
+// order, and it was wrong in both directions.
 enum class BootStage {
-    // Publisher/developer idents and the content notice are one continuous
-    // video -- LOGOW.PSS / LOGON.PSS, 16.76 s, no separate warning asset
-    // anywhere in the archive. Splitting it into two stages was a guess before
-    // the video was playable; playing it showed both idents and the notice as
-    // frames of the same clip.
-    Logo,
-    AspectSelect,    // 4:3 or widescreen; the art for it is sho_aspect_**
-    LanguageSelect,  // six flags; skipped when the language is already chosen
+    Loading,         // the copyright plate, held while the first load runs
+    LanguageSelect,  // five flags
+    AspectSelect,    // 4:3 or widescreen; art is sho_aspect_**
+    Logo,            // LOGOW.PSS / LOGON.PSS -- idents and content notice, one clip
     MainMenu,
     InGame,
 };
 
-// The six the game offers. Two of them are English -- the flag chooses the
-// wording, not the string file -- and there is no flag for Japanese even though
-// Strings.Jap ships, because that build selects it another way.
-enum class Language { English_GB, English_US, French, German, Italian, Spanish };
+// The five the game offers, in the order the flag row shows them.
+//
+// From the table at `0x00338A5C`, stride 12, name pointer first:
+// sho_flg_GB, sho_flg_FR, sho_flg_IT, sho_flg_DE, sho_flg_ES. There is no US
+// flag -- an earlier guess added one and reordered the rest -- and no Japanese
+// flag either, even though Strings.Jap ships, because that build selects its
+// language another way.
+enum class Language { English, French, Italian, German, Spanish };
 
 // The texture base name in the Startup container. Append "_h" for the
 // highlighted variant.
@@ -49,6 +61,17 @@ const char *LanguageFlag(Language l);
 // Which Strings.* file it wants.
 const char *LanguageStrings(Language l);
 int LanguageCount();
+
+// Where the flag row goes, straight out of `FUN_00151918`: five 80x60 quads on
+// one line, the first at (32, 192), each 92 px further along -- 12 px of gap
+// plus the 80 px quad. Coordinates are in the 512x448 space the UI is authored
+// in. Highlighted is drawn white, the rest at 0xC8505050.
+struct FlagRowLayout {
+    float x = 32.0f, y = 192.0f;
+    float w = 80.0f, h = 60.0f;
+    float step = 92.0f;
+};
+FlagRowLayout LanguageRow();
 
 const char *BootStageName(BootStage s);
 
@@ -114,6 +137,10 @@ public:
     // actually finishing -- 16.76 s in the retail files). Without a video this
     // stops the boot sequence from hanging forever with nothing on screen.
     float logoSeconds = 17.0f;
+    // How long the copyright plate holds. In the retail game this is however
+    // long the first load takes, not a timer; with nothing to load yet it needs
+    // a duration, and a keypress skips it as it does there.
+    float loadingSeconds = 3.0f;
 
     // Set false to make the language stage appear; the game shows it once, on
     // first boot, and remembers the answer.
@@ -121,7 +148,7 @@ public:
     bool aspectChosen = false;
 
     // What the player picked on those two screens.
-    Language language = Language::English_GB;
+    Language language = Language::English;
     bool widescreen = true;
     int languageIndex = 0;   // cursor on the flag row
 
@@ -137,10 +164,12 @@ public:
     std::string Update(float dt, const MenuInput &in);
 
 private:
-    BootStage m_stage = BootStage::Logo;
+    BootStage m_stage = BootStage::Loading;
     float m_elapsed = 0.0f;
     MenuState m_menu;
 
+    // Which stage follows `from`, honouring the two "already answered" skips.
+    BootStage NextStage(BootStage from) const;
     void Enter(BootStage s);
 };
 

@@ -3,37 +3,39 @@
 namespace ClimaxEngine {
 namespace Game {
 
+// The flag row, in the order `FUN_00151918` walks the table at 0x00338A5C.
 const char *LanguageFlag(Language l) {
     switch (l) {
-    case Language::English_GB: return "sho_flg_GB";
-    case Language::English_US: return "sho_flg_US";
-    case Language::French:     return "sho_flg_FR";
-    case Language::German:     return "sho_flg_DE";
-    case Language::Italian:    return "sho_flg_IT";
-    case Language::Spanish:    return "sho_flg_ES";
+    case Language::English: return "sho_flg_GB";
+    case Language::French:  return "sho_flg_FR";
+    case Language::Italian: return "sho_flg_IT";
+    case Language::German:  return "sho_flg_DE";
+    case Language::Spanish: return "sho_flg_ES";
     }
     return "sho_flg_GB";
 }
 
 const char *LanguageStrings(Language l) {
     switch (l) {
-    case Language::English_GB:
-    case Language::English_US: return "Strings.Eng";
-    case Language::French:     return "Strings.Fre";
-    case Language::German:     return "Strings.Ger";
-    case Language::Italian:    return "Strings.Ita";
-    case Language::Spanish:    return "Strings.Spa";
+    case Language::English: return "Strings.Eng";
+    case Language::French:  return "Strings.Fre";
+    case Language::Italian: return "Strings.Ita";
+    case Language::German:  return "Strings.Ger";
+    case Language::Spanish: return "Strings.Spa";
     }
     return "Strings.Eng";
 }
 
-int LanguageCount() { return 6; }
+int LanguageCount() { return 5; }
+
+FlagRowLayout LanguageRow() { return FlagRowLayout{}; }
 
 const char *BootStageName(BootStage s) {
     switch (s) {
-    case BootStage::Logo: return "Logo";
-    case BootStage::AspectSelect: return "AspectSelect";
+    case BootStage::Loading: return "Loading";
     case BootStage::LanguageSelect: return "LanguageSelect";
+    case BootStage::AspectSelect: return "AspectSelect";
+    case BootStage::Logo: return "Logo";
     case BootStage::MainMenu: return "MainMenu";
     case BootStage::InGame: return "InGame";
     }
@@ -162,7 +164,7 @@ std::string MenuState::Update(const MenuInput &in) {
 // ── FrontEnd ─────────────────────────────────────────────────────────────────
 
 void FrontEnd::Reset() {
-    m_stage = BootStage::Logo;
+    m_stage = BootStage::Loading;
     m_elapsed = 0.0f;
 }
 
@@ -173,50 +175,83 @@ void FrontEnd::Enter(BootStage s) {
         m_menu.Open("mainmenu");
 }
 
+// Where the next stage comes from: the game keeps its front end as a table of
+// 12-byte state records at 0x00338A00 and dispatches on the record's first
+// word, `FUN_00151d60`. Nothing in that table encodes the *order* -- the state
+// index is written from outside -- so the sequence below is the one the retail
+// game runs on screen: copyright plate, language, aspect, logo, menu.
+//
+// Both language and aspect are skippable once answered; the game asks on first
+// boot and remembers, which is why a returning player sees only the logo.
+BootStage FrontEnd::NextStage(BootStage from) const {
+    switch (from) {
+    case BootStage::Loading:
+        if (!languageChosen) return BootStage::LanguageSelect;
+        // fallthrough
+    case BootStage::LanguageSelect:
+        if (!aspectChosen) return BootStage::AspectSelect;
+        // fallthrough
+    case BootStage::AspectSelect:
+        return BootStage::Logo;
+    case BootStage::Logo:
+        return BootStage::MainMenu;
+    default:
+        return from;
+    }
+}
+
 std::string FrontEnd::Update(float dt, const MenuInput &in) {
     m_elapsed += dt;
 
     switch (m_stage) {
+    case BootStage::Loading:
+        // Held for however long the first load takes; here that is a timer,
+        // skippable the way the original is.
+        if (m_elapsed >= loadingSeconds || in.anyKey || in.accept)
+            Enter(NextStage(m_stage));
+        return {};
+
+    case BootStage::LanguageSelect: {
+        // `FUN_00151918` draws the five flags as one horizontal row, so the
+        // cursor moves on the horizontal axis. Up/down are accepted too --
+        // harmless, and it saves a player hunting for the right key.
+        const int n = LanguageCount();
+        if (in.left  || in.up)   languageIndex = (languageIndex + n - 1) % n;
+        if (in.right || in.down) languageIndex = (languageIndex + 1) % n;
+        language = (Language)languageIndex;
+        if (in.accept) {
+            languageChosen = true;
+            Enter(NextStage(m_stage));
+        }
+        return {};
+    }
+
+    case BootStage::AspectSelect:
+        // `FUN_00151fb8` steps its two entries in y, one under the other, and
+        // they are strings -- `display_4x3` and `display_ws` are string-table
+        // ids, not textures. So this list is vertical where the flags are not.
+        if (in.up)   widescreen = false;   // 4:3 is drawn first
+        if (in.down) widescreen = true;
+        if (in.left) widescreen = false;
+        if (in.right) widescreen = true;
+        if (in.accept) {
+            aspectChosen = true;
+            Enter(NextStage(m_stage));
+        }
+        return {};
+
     case BootStage::Logo:
         // Advances when the LOGOW/LOGON clip actually ends, or -- once it has
         // had a moment to be seen -- on a keypress, the same as the original.
         // `logoSeconds` only fires if no video is playing at all, so the boot
         // sequence can never hang on a missing asset.
         if (in.mediaEnded || m_elapsed >= logoSeconds ||
-            ((in.anyKey || in.accept) && m_elapsed > 1.0f)) {
-            if (!aspectChosen) Enter(BootStage::AspectSelect);
-            else if (!languageChosen) Enter(BootStage::LanguageSelect);
-            else Enter(BootStage::MainMenu);
-        }
+            ((in.anyKey || in.accept) && m_elapsed > 1.0f))
+            Enter(NextStage(m_stage));
         return {};
 
-    case BootStage::AspectSelect:
-        if (in.left) widescreen = false;
-        if (in.right) widescreen = true;
-        if (in.accept) {
-            aspectChosen = true;
-            Enter(languageChosen ? BootStage::MainMenu : BootStage::LanguageSelect);
-        }
-        return {};
-
-    case BootStage::LanguageSelect: {
-        const int n = LanguageCount();
-        if (in.left)  languageIndex = (languageIndex + n - 1) % n;
-        if (in.right) languageIndex = (languageIndex + 1) % n;
-        language = (Language)languageIndex;
-        if (in.accept) {
-            languageChosen = true;
-            Enter(BootStage::MainMenu);
-        }
-        return {};
-    }
-
-    case BootStage::MainMenu: {
-        const std::string cmd = m_menu.Update(in);
-        if (!cmd.empty())
-            return cmd;
-        return {};
-    }
+    case BootStage::MainMenu:
+        return m_menu.Update(in);
 
     case BootStage::InGame:
         return {};
