@@ -569,15 +569,12 @@ been rewritten to match. What they say:
   draw nothing per frame — the movie and the copyright plate are put up
   elsewhere — which is why searching for logo drawing code found nothing.
 
-The stage order is *not* in the table; the state index is written from outside
-it. It is taken from the retail game on screen: copyright plate -> language ->
-aspect -> logo -> menu. `climax-play --check` prints exactly that.
-
-Still open here: whoever writes `obj + 8` (the state index) and `obj + 0xc` (the
-cursor) — that is where the "asked once, then remembered" behaviour lives, and
-`FrontEnd::NextStage` currently reproduces it by assumption rather than by
-reading it. The 512x448 authored space that `uiQuad` maps onto is inferred from
-the row spanning x=32..480, not read.
+Two claims in the paragraph above were wrong and §6d corrects them: the order
+**is** in the table (the index is simply incremented, one record at a time), and
+`FUN_00152250`/`FUN_001521e8` being stubs does not mean those stages draw
+nothing — it means they draw a *movie*, which the player module puts on screen
+without going through the front end's draw call. The 512x448 authored space that
+`uiQuad` maps onto is still inferred from the row spanning x=32..480, not read.
 
 ### 7a. Video — playing, audio still open
 
@@ -716,3 +713,92 @@ beside it: **five flags, GB FR IT DE ES**, not the six `climax-play` invents.
 Next: read `FUN_00151918`, `FUN_00152250`, `FUN_001521e8` and whoever writes
 `obj + 8`, then replace `Game::FrontEnd`'s enum with the same table-driven
 dispatch against our renderer.
+
+### 6d. The front end, transcribed (done)
+
+The whole boot sequence is now read out of `SLES_551.47` and transcribed into
+`Game::FrontEnd`. Nothing in it is timed, invented or eyeballed any more.
+
+**The state table at 0x00338A00**, five 12-byte records `{kind, arg, skippable}`,
+dumped from `.data`:
+
+    [0] kind 0  language select
+    [1] kind 3  memory card check
+    [2] kind 1  aspect select
+    [3] kind 2  play movie "Logo"      (skippable = 0)
+    [4] kind 4  leave the front end
+
+So the retail order is **language → memory card → aspect → logo movie → menu**.
+The logo is fourth, not first. There is no copyright/loading plate in this
+object at all. The splash **does** exist — it is just not a state:
+`FUN_001D78E0`, the engine's own init, resolves `"splash_p4.jpg"` (a literal,
+no region or language variant), makes a texture, blits it at (0,0) and presents
+it *twice*, once into each framebuffer, then frees it and never draws it again.
+The picture simply stays on screen for as long as initialisation takes, which is
+why it has no timer and no record. `climax-play` now does the same: it draws the
+splash before it reads the archive, not after.
+
+Nothing is written over it. The string `loading` at an eyeballed y=268 was
+invented and is gone. The game's loading indicator is a separate texture,
+`"LoadingIcon"` out of Startup, loaded by `FUN_001B44A0` in that same init and
+animated by `FUN_001F0678` (rotating quads, scaled 0.7500188 in widescreen);
+its placement has not been read yet.
+
+**`FUN_00152278`** allocates the object as 0x14 bytes — `{refcount, vtable,
+stateIndex, cursor, done}` — zeroes the last three and enters record 0. The
+index is simply `+1` per completed record, which is why the order is the table's
+own. §6b's "the order is not in the table" was wrong.
+
+**`FUN_001515D0`** is the frame:
+
+1. ask the pad for `MsgGetPadButtonMask`, take the rising edge against
+   `DAT_00338AB8` (initialised to 0xFFFFFFFF, so nothing held at boot counts);
+2. `FUN_001AE558() != 0` (a fade or a load) discards the edge rather than
+   queueing it;
+3. run the record's update; if it returns 0, stop here;
+4. otherwise run its exit, `index + 1`, run the next record's entry. The entry's
+   return value is "did this state start" — false marks it finished at once,
+   which is the only mechanism by which a state is skipped.
+
+**The button mask is not raw pad bits.** `FUN_00193F90` remaps them:
+
+    0x001 up (raw 0x1000)     0x010 triangle (0x0010)   0x100 start  (0x0800)
+    0x002 down (0x4000)       0x020 cross    (0x0040)   0x200 select (0x0100)
+    0x004 left (0x8000)       0x040 square   (0x0080)   0x400 L1     (0x0004)
+    0x008 right (0x2000)      0x080 circle   (0x0020)   0x800 R1     (0x0008)
+
+That is why `FUN_00151E98` tests `& 4` / `& 8` (left/right, the flag row is
+horizontal) and `FUN_00151F58` tests `& 1` / `& 2` (up/down, the aspect list is
+vertical), and why `0x120` in `FUN_00152218` is cross-or-start.
+
+**Per record:**
+
+* **Language (`FUN_00151E00/E98/F28`).** Entry plays the movie `"Back"` on loop
+  as the background and *returns whether it started*; it returns 0 outright when
+  the current language is 5 (Japanese), which is how a JAP build never asks.
+  Left/right only, wrapped mod 5. `FUN_001F3600` is called **on the move, not on
+  accept** — the heading is descriptor word 0 of the language under the cursor,
+  the language's own name in its own script, so it changes as the cursor
+  travels. Exit builds the string table from `Strings.<code>`.
+* **Memory card (`FUN_00152198/21C8`).** `FUN_001D3AD0` queues
+  `MEMCARD_MSG_CHECK` and reads `PlayerData`; the record ends when the card task
+  stops reporting busy. Draws nothing — the `"Back"` movie is still up.
+* **Aspect (`FUN_00151F48/F58/2120`).** Entry resets the cursor and **always
+  returns 1**: the question is asked on every boot, there is no remembered path.
+  Up/down, mod 2. Exit writes the mode word to the display-mode global
+  (`base+0x198`), *then* stops the `"Back"` movie, then loads `LocaleUI`.
+* **Movie (`FUN_001521F8/2218/2258`).** `FUN_00180DB8(arg, 0)` resolves
+  `<movies>/<first letter>/<name><N|W>.pss` — the N/W suffix reads the same
+  display-mode global the aspect record just wrote — and the record ends on the
+  player's `"Ended"` message (0x006BFF68, `FUN_00151810`). Cross or start skip
+  it only when the record's third word is nonzero, and the Logo record's is 0.
+* **Leave.** `FUN_001FF3F8`; the main menu is the next game state.
+
+**Language descriptors, 0x0033EFB0, 7 × 20 bytes:** `{own name (UTF-16), 3-letter
+code, font name, font id, "controller not detected" text}` — English, Français,
+Italiano, Deutsch, Español, Japanese, Korean. `Strings.%s` takes the code;
+`FontEUR` for the first five, `FontJAP` for the last two.
+
+Still open: the 512x448 authored space is inferred, not read; `FontJAP` and the
+Japanese/Korean descriptors are unused by the PAL disc and untested; the memory
+card task is a no-op here, so its record completes on the first frame.

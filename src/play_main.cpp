@@ -14,6 +14,8 @@
 #include <SDL.h>
 #include <SDL_image.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -416,6 +418,7 @@ std::string ResolveMoviePath(const std::string &moviesDir, const std::string &ba
 int main(int argc, char **argv) {
     const char *arcPath = "game-iso/SHO/SH.ARC";
     std::string moviesDir = "SHO-port/MOVIES";   // tools/convert_movies.py's output
+    std::string musicDir  = "SHO-port/MUSIC";    // converted MUSIC/*.RWS
     // --check loads everything and reports, without opening a window. The data
     // half is worth testing on its own: it is the half that can be wrong
     // quietly, and it is the half a build machine can run.
@@ -424,6 +427,7 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--check") == 0) checkOnly = true;
         else if (std::strcmp(argv[i], "--movies") == 0 && i + 1 < argc) moviesDir = argv[++i];
+        else if (std::strcmp(argv[i], "--music") == 0 && i + 1 < argc) musicDir = argv[++i];
         // Writes one archive entry to stdout verbatim. The game reads its
         // screens out of SH.ARC, so anything worth looking at is in there.
         else if (std::strcmp(argv[i], "--dump") == 0 && i + 1 < argc) dumpEntry = argv[++i];
@@ -483,6 +487,54 @@ int main(int argc, char **argv) {
         textures[raw.name] = id;
         raw.glID = id;
     });
+
+    // ── the very first screen ───────────────────────────────────────────────
+    //
+    // `FUN_001D78E0` is the engine's own init, and the first thing it does --
+    // before it mounts sh.arc, before any module, before the front end object
+    // exists -- is resolve "splash_p4.jpg", make a texture of it, blit it at
+    // (0,0) and present it *twice*, once into each framebuffer. Then it frees
+    // the texture and never draws it again: the picture just stays on screen
+    // for however long the initialisation takes.
+    //
+    // So it is not a stage and it has no timer, which is why it is not in the
+    // state table at 0x00338A00. It is the frame the console is left holding.
+    // Doing the same here means drawing it before the archive is read, not
+    // after. Nothing is written over it -- the string `loading` at y=268 was
+    // invented and is gone. The game's loading indicator is a separate texture,
+    // "LoadingIcon" out of Startup, registered here by FUN_001B44A0 and spun by
+    // FUN_001F0678; it is not part of this picture.
+    if (!checkOnly) {
+        std::vector<uint8_t> sp;
+        if (ReadEntry(arc, "splash_p4.jpg", sp)) {
+            size_t a = 0;
+            while (a + 1 < sp.size() && !(sp[a] == 0xFF && sp[a + 1] == 0xD8)) ++a;
+            int jw = 0, jh = 0;
+            const GLuint id = a + 1 < sp.size()
+                ? MakeTextureFromJpeg(sp.data() + a, sp.size() - a, jw, jh) : 0;
+            if (id) {
+                textures["splash_p4"] = id;
+                int w = 0, h = 0;
+                SDL_GL_GetDrawableSize(win, &w, &h);
+                // FUN_001D78E0 blits it at (0,0) straight into the
+                // framebuffer -- it fills the screen, it is not fitted to an
+                // aspect and not letterboxed.
+                const float dx = 0.0f, dy = 0.0f, dw = (float)w, dh = (float)h;
+                // Twice, into both buffers, exactly as FUN_001D78E0 does.
+                for (int i = 0; i < 2; ++i) {
+                    glViewport(0, 0, w, h);
+                    glClearColor(0, 0, 0, 1);
+                    glClear(GL_COLOR_BUFFER_BIT);
+                    painter.Begin(w, h);
+                    painter.Quad(dx, dy, dw, dh, id, 1, 1, 1, 1);
+                    SDL_GL_SwapWindow(win);
+                }
+                std::fprintf(stderr, "[play] splash 'splash_p4' %dx%d (held while loading)\n",
+                             jw, jh);
+            }
+        }
+    }
+
 
     // ── the data the menu is made of ────────────────────────────────────────
     std::vector<uint8_t> buf;
@@ -632,85 +684,194 @@ int main(int argc, char **argv) {
         drawText(cx - measure(t, sc) * 0.5f, y, sc, t, r, g, b, a, false);
     };
 
+    // ── video ───────────────────────────────────────────────────────────────
+    // Every background in the front end is a movie, not a still. The state
+    // machine asks for them by bare name -- "Back" behind the language and
+    // aspect screens, "Logo" as a state of its own -- and FUN_00180798 turns
+    // that name into <movies>/<first letter>/<name><N|W>.pss, the N/W picked by
+    // the display-mode global this same front end sets. Here they come from
+    // tools/convert_movies.py's output, which also corrects the aspect the PS2
+    // stretches on output and the .PSS files do not record.
+#ifdef CLIMAX_HAVE_FFMPEG
+    VideoPlayer bgVideo, menuVideo;
+    bool haveVideoSupport = true;
+#else
+    bool haveVideoSupport = false;
+    std::fprintf(stderr, "[play] built without FFmpeg -- boot movies will not play\n");
+#endif
+    bool bgLooping = false;
+    std::string bgName;
+
+    // ── the two clips the boot sequence needs ───────────────────────────────
+    //
+    // MUSIC/*.RWS is interleaved ADPCM and stutters through the current
+    // decoder, so prefer the converted WAVs under SHO-port/MUSIC and only fall
+    // back to the disc if they are not there.
+    //
+    // LUMBRYRD is the logo's audio: it runs with LOGO*, and the menu's own
+    // ambient starts the moment the logo ends -- there is no gap and no fade
+    // between them.
+    AudioClip menuClip, logoClip;
+    if (!checkOnly) {
+        std::string arcDir;
+        const size_t sl = std::string(arcPath).find_last_of("/\\");
+        arcDir = sl != std::string::npos ? std::string(arcPath).substr(0, sl + 1) : "";
+        auto loadTrack = [&](const char *letter, const char *stem, AudioClip &into) {
+            const std::string wav = musicDir + "/" + letter + "/" + stem + ".WAV";
+            const std::string rws = arcDir + "MUSIC/" + letter + "/" + stem + ".RWS";
+            if (::Audio::LoadFile(wav, into))
+                std::fprintf(stderr, "[play] audio %s: %s (%.1f s)\n", stem, wav.c_str(), into.Seconds());
+            else if (::Audio::LoadFile(rws, into))
+                std::fprintf(stderr, "[play] audio %s: %s (%.1f s, RWS fallback)\n", stem, rws.c_str(), into.Seconds());
+            else
+                std::fprintf(stderr, "[play] audio %s: not found (%s)\n", stem, wav.c_str());
+        };
+        loadTrack("M", "MENU", menuClip);
+        loadTrack("L", "LUMBRYRD", logoClip);
+    }
+    bool wide = true;   // updated per frame from the window, seeded widescreen
+
+    // ── the host side of the front end ──────────────────────────────────────
+    //
+    // One method per function in the executable. The state machine in
+    // Game::FrontEnd is a transcription and knows nothing about GL, SDL or
+    // FFmpeg; everything platform-shaped lives here.
+    struct PlayHost : Game::FrontEndHost {
+        std::function<bool(const char *, bool)> playMovie;
+        std::function<void()> stopMovie;
+        std::function<void(int)> loadStringsFor;
+        int language = 0;      // 0x0033F044
+        int displayMode = 1;   // base+0x198; 1 = widescreen
+        bool left = false;
+
+        bool PlayMovie(const char *n, bool loop) override {
+            return playMovie ? playMovie(n, loop) : false;
+        }
+        void StopMovie() override { if (stopMovie) stopMovie(); }
+        void SetLanguage(int id) override { language = id; }
+        int CurrentLanguage() const override { return language; }
+        void LoadStrings() override { if (loadStringsFor) loadStringsFor(language); }
+        void SetDisplayMode(int mode) override { displayMode = mode; }
+        void LoadLocaleUI() override {}
+        // There is no memory card here and nothing to read off one, so the
+        // card task is never busy and the state completes on its first frame --
+        // which is what the original does too when the card holds no PlayerData.
+        void MemoryCardCheck() override {}
+        bool MemoryCardBusy() const override { return false; }
+        void Leave() override { left = true; }
+    } host;
+
+    host.loadStringsFor = [&](int id) {
+        // FUN_001F31D8: the string table is rebuilt from Strings.<code> for the
+        // language that was just accepted.
+        const char *entry = Game::LanguageStrings((Game::Language)id);
+        std::vector<uint8_t> sb;
+        if (ReadEntry(arc, entry, sb)) {
+            strings.Load(sb.data(), sb.size());
+            std::fprintf(stderr, "[play] strings: %s (%zu)\n", entry, strings.Count());
+        } else {
+            std::fprintf(stderr, "[play] strings: %s not in the archive\n", entry);
+        }
+    };
+    host.playMovie = [&](const char *name, bool loop) -> bool {
+#ifdef CLIMAX_HAVE_FFMPEG
+        // --check has no GL context, and the decoder uploads to a texture.
+        if (haveVideoSupport && !checkOnly) {
+            bgVideo.Close();
+            const std::string base = name;   // "Back", "Logo"
+            std::string upper;
+            for (char c : base) upper += (char)std::toupper((unsigned char)c);
+            const std::string p = ResolveMoviePath(
+                moviesDir, upper, host.displayMode != 0,
+                (Game::Language)host.language);
+            if (!p.empty() && bgVideo.Open(p)) {
+                bgLooping = loop;
+                bgName = upper;
+                // The logo record's audio is not in the clip -- it is
+                // LUMBRYRD, started with the picture and ending with it.
+                if (upper == "LOGO" && logoClip.Valid())
+                    ClimaxEngine::Audio::CAudioRelay::GetInstance().PlayAudioClip(logoClip);
+                std::fprintf(stderr, "[play] movie '%s' -> %s (%dx%d)%s\n",
+                             name, p.c_str(), bgVideo.Width(), bgVideo.Height(),
+                             loop ? " looping" : "");
+                return true;
+            }
+            std::fprintf(stderr, "[play] movie '%s': nothing under %s\n",
+                         name, moviesDir.c_str());
+        }
+#else
+        (void)loop;
+        std::fprintf(stderr, "[play] movie '%s': no decoder in this build\n", name);
+#endif
+        // The return is not cosmetic: FUN_00151E00 passes it back as "did this
+        // state start", so answering false here would make the game skip the
+        // language screen. A still backdrop is a screen, so say yes when one
+        // exists and let the drawing code fall back to it.
+        bgName = name;
+        bgLooping = loop;
+        return true;
+    };
+    host.stopMovie = [&]() {
+#ifdef CLIMAX_HAVE_FFMPEG
+        bgVideo.Close();
+#endif
+        bgName.clear();
+        bgLooping = false;
+    };
+
     Game::FrontEnd front;
     front.Menu().SetScreens(screens);
+    front.Start(&host);
 
     if (checkOnly) {
-        // Walk the boot sequence with a synthetic keypress each frame, so the
-        // stage order and the menu wiring are exercised rather than assumed.
-        Game::MenuInput press;
-        press.anyKey = press.accept = true;
-        Game::BootStage last = front.Stage();
-        std::fprintf(stderr, "[check] stage %s\n", Game::BootStageName(last));
-        for (int i = 0; i < 600 && front.Stage() != Game::BootStage::MainMenu; ++i) {
-            front.Update(0.05f, i % 20 == 19 ? press : Game::MenuInput{});
-            if (front.Stage() != last) {
-                last = front.Stage();
-                std::fprintf(stderr, "[check] stage %s\n", Game::BootStageName(last));
+        // Walk the table with cross held down every 20th frame, so the record
+        // order and the menu wiring are exercised rather than assumed.
+        int last = -1;
+        for (int i = 0; i < 600 && !host.left; ++i) {
+            if (front.StateIndex() != last) {
+                last = front.StateIndex();
+                std::fprintf(stderr, "[check] state %d %s\n", last,
+                             Game::BootKindName(front.Kind()));
             }
+            // The Logo record is not skippable, so end it the way the movie
+            // player would.
+            if (front.Kind() == Game::BootKind::Movie && i % 20 == 19)
+                front.NotifyMovieEnded();
+            front.Update(i % 20 == 19 ? Game::Pad::Cross : 0u);
         }
+        std::fprintf(stderr, "[check] language %s, display %s\n",
+                     Game::LanguageOwnName((Game::Language)host.language),
+                     host.displayMode ? "widescreen" : "4:3");
+        front.Menu().Open("mainmenu");
         std::fprintf(stderr, "[check] screen '%s', active '%s'\n",
                      front.Menu().ScreenId().c_str(), front.Menu().ActiveId().c_str());
         Game::MenuInput down; down.down = true;
         for (int i = 0; i < 4; ++i) {
-            front.Update(0.016f, down);
+            front.Menu().Update(down);
             std::fprintf(stderr, "[check]   down -> '%s'\n",
                          front.Menu().ActiveId().c_str());
         }
         Game::MenuInput ok; ok.accept = true;
-        const std::string cmd = front.Update(0.016f, ok);
+        const std::string cmd = front.Menu().Update(ok);
         std::fprintf(stderr, "[check] accept -> screen '%s'%s\n",
                      front.Menu().ScreenId().c_str(),
                      cmd.empty() ? "" : (" command '" + cmd + "'").c_str());
         return 0;
     }
 
-    // ── video ───────────────────────────────────────────────────────────────
-    // The idents, the content notice and the menu background are movies in the
-    // retail game (`bgmovie="Menu"` in mainmenu.xml; LOGOW/LOGON covers both the
-    // idents and the notice as one 16.76 s clip -- there is no separate warning
-    // asset anywhere in the archive). Played from tools/convert_movies.py's
-    // output, which corrects the aspect the PS2 stretches on output and the
-    // .PSS files do not record.
-#ifdef CLIMAX_HAVE_FFMPEG
-    VideoPlayer logoVideo, menuVideo;
-    bool haveVideoSupport = true;
-#else
-    bool haveVideoSupport = false;
-    std::fprintf(stderr, "[play] built without FFmpeg -- boot movies will not play\n");
-#endif
-    Game::BootStage lastStage = front.Stage();
-    bool lastWide = true;
-    bool musicStarted = false;
-
-    // ── menu music ──────────────────────────────────────────────────────────
-    // MENU.RWS sits in MUSIC/M/ relative to the disc root (one dir up from
-    // the SH.ARC directory).
-    AudioClip menuClip;
-    {
-        // Derive MUSIC path from arcPath: strip filename, go up one level.
-        std::string arcDir;
-        const size_t sl = std::string(arcPath).find_last_of("/\\");
-        arcDir = sl != std::string::npos ? std::string(arcPath).substr(0, sl + 1) : "";
-        const std::string musicPath = arcDir + "MUSIC/M/MENU.RWS";
-        if (!checkOnly && ::Audio::LoadFile(musicPath, menuClip))
-            std::fprintf(stderr, "[play] menu music: %s (%.0f s)\n",
-                         musicPath.c_str(), menuClip.Seconds());
-        else if (!checkOnly)
-            std::fprintf(stderr, "[play] menu music not found at: %s\n",
-                         musicPath.c_str());
-    }
+    bool inMenu = false;   // set once the terminal record has been reached
+    int lastState = -1;
 
     // ── loop ────────────────────────────────────────────────────────────────
     bool run = true;
     uint64_t last = SDL_GetPerformanceCounter();
     while (run) {
+        // Edges, for the XML menu -- that machine is written against presses.
         Game::MenuInput in;
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_QUIT) run = false;
             if (e.type != SDL_KEYDOWN) continue;
-            in.anyKey = true;
             switch (e.key.keysym.sym) {
             case SDLK_ESCAPE:  in.cancel = true; break;
             case SDLK_UP:      in.up = true; break;
@@ -723,76 +884,90 @@ int main(int argc, char **argv) {
             }
         }
 
+        // Levels, for the front end. FUN_001515D0 asks the pad for its current
+        // mask and takes the rising edge itself, so handing it edges would run
+        // the edge detector twice and lose presses.
+        const Uint8 *keys = SDL_GetKeyboardState(nullptr);
+        uint32_t buttons = 0;
+        if (keys[SDL_SCANCODE_UP])     buttons |= Game::Pad::Up;
+        if (keys[SDL_SCANCODE_DOWN])   buttons |= Game::Pad::Down;
+        if (keys[SDL_SCANCODE_LEFT])   buttons |= Game::Pad::Left;
+        if (keys[SDL_SCANCODE_RIGHT])  buttons |= Game::Pad::Right;
+        if (keys[SDL_SCANCODE_RETURN] || keys[SDL_SCANCODE_SPACE])
+            buttons |= Game::Pad::Cross;
+        if (keys[SDL_SCANCODE_ESCAPE]) buttons |= Game::Pad::Circle;
+        if (keys[SDL_SCANCODE_TAB])    buttons |= Game::Pad::Start;
+
         const uint64_t now = SDL_GetPerformanceCounter();
         const float dt = (float)((now - last) / (double)SDL_GetPerformanceFrequency());
         last = now;
 
         int w, h;
         SDL_GL_GetDrawableSize(win, &w, &h);
-        // Author-space to window-space. The game ships both a widescreen and a
-        // 4:3 layout, and picks by display mode; this picks the same way.
-        const bool wide = (float)w / (float)h > 1.5f;
+        // Author-space to window-space. Which layout the *art* uses follows the
+        // window; which movie is loaded follows the display mode the player
+        // picked, the same global FUN_00180798 reads for its N/W suffix.
+        wide = (float)w / (float)h > 1.5f;
 
 #ifdef CLIMAX_HAVE_FFMPEG
-        // Advance whichever clip is current *before* FrontEnd::Update, so a
-        // clip that just finished can end the Logo stage this same frame
-        // instead of one frame late.
-        if (front.Stage() == Game::BootStage::Logo && haveVideoSupport) {
-            if (!logoVideo.IsOpen() || lastWide != wide) {
-                const std::string p = ResolveMoviePath(moviesDir, "LOGO", wide, front.language);
-                if (!p.empty() && logoVideo.Open(p))
-                    std::fprintf(stderr, "[play] logo video: %s (%dx%d)\n",
-                                 p.c_str(), logoVideo.Width(), logoVideo.Height());
-                else
-                    std::fprintf(stderr, "[play] no logo video at '%s' for base LOGO\n",
-                                 moviesDir.c_str());
-            }
-            if (logoVideo.IsOpen()) {
-                logoVideo.Update(dt);
-                in.mediaEnded = logoVideo.Finished();
+        // Advance the front end's clip *before* the state machine, so a clip
+        // that just finished ends its record this same frame rather than one
+        // frame late. A looping background restarts itself; a one-shot sends
+        // the "Ended" message, which is exactly what FUN_00151810 acts on.
+        if (haveVideoSupport && !inMenu && bgVideo.IsOpen()) {
+            bgVideo.Update(dt);
+            if (bgVideo.Finished()) {
+                if (bgLooping) bgVideo.Restart();
+                else front.NotifyMovieEnded();
             }
         }
 #endif
 
-        const std::string cmd = front.Update(dt, in);
-        if (!cmd.empty())
-            std::fprintf(stderr, "[play] command: %s\n", cmd.c_str());
+        if (!inMenu) {
+            front.Update(buttons);
+            if (front.StateIndex() != lastState) {
+                lastState = front.StateIndex();
+                std::fprintf(stderr, "[play] state %d %s\n", lastState,
+                             Game::BootKindName(front.Kind()));
+            }
+            if (host.left) {
+                // The terminal record: the front end object is gone and the
+                // main menu is the next game state.
+                inMenu = true;
+                front.Menu().Open("mainmenu");
+                // Straight into the menu's ambient, on the same frame the
+                // menu movie is opened below -- the logo ends and the menu is
+                // already playing, there is no silence between them.
+                if (menuClip.Valid())
+                    ClimaxEngine::Audio::CAudioRelay::GetInstance().PlayMusic(menuClip, 0.65f);
+                std::fprintf(stderr, "[play] front end done -- language %s, %s\n",
+                             Game::LanguageOwnName((Game::Language)host.language),
+                             host.displayMode ? "widescreen" : "4:3");
+            }
+        } else {
+            const std::string cmd = front.Menu().Update(in);
+            if (!cmd.empty())
+                std::fprintf(stderr, "[play] command: %s\n", cmd.c_str());
+        }
 
 #ifdef CLIMAX_HAVE_FFMPEG
-        if (haveVideoSupport) {
-            // Enter the menu's looping background the moment the stage
-            // changes, rather than waiting to be asked -- mainmenu.xml itself
-            // says loop_movie="true".
-            if (front.Stage() == Game::BootStage::MainMenu &&
-                (lastStage != Game::BootStage::MainMenu || !menuVideo.IsOpen())) {
-                const std::string p = ResolveMoviePath(moviesDir, "MENU", wide, front.language);
+        if (haveVideoSupport && inMenu) {
+            // mainmenu.xml asks for `bgmovie="Menu"` with loop_movie="true".
+            if (!menuVideo.IsOpen()) {
+                const std::string p = ResolveMoviePath(
+                    moviesDir, "MENU", host.displayMode != 0,
+                    (Game::Language)host.language);
                 if (!p.empty() && menuVideo.Open(p))
                     std::fprintf(stderr, "[play] menu video: %s (%dx%d)\n",
                                  p.c_str(), menuVideo.Width(), menuVideo.Height());
             }
-            if (front.Stage() == Game::BootStage::MainMenu && menuVideo.IsOpen()) {
+            if (menuVideo.IsOpen()) {
                 menuVideo.Update(dt);
                 if (menuVideo.Finished())
                     menuVideo.Restart();
             }
         }
 #endif
-        if (front.Stage() != lastStage) {
-            std::fprintf(stderr, "[play] stage %s → %s\n",
-                         Game::BootStageName(lastStage), Game::BootStageName(front.Stage()));
-
-            // Start menu music on first transition to LanguageSelect or MainMenu.
-            const bool wantMusic =
-                front.Stage() == Game::BootStage::LanguageSelect ||
-                front.Stage() == Game::BootStage::MainMenu;
-            if (wantMusic && !musicStarted && menuClip.Valid()) {
-                auto& relay = ClimaxEngine::Audio::CAudioRelay::GetInstance();
-                relay.PlayMusic(menuClip, 0.65f);
-                musicStarted = true;
-            }
-        }
-        lastStage = front.Stage();
-        lastWide = wide;
 
         glViewport(0, 0, w, h);
         glClearColor(0.02f, 0.02f, 0.03f, 1.0f);
@@ -802,17 +977,44 @@ int main(int argc, char **argv) {
         // Only the PAL sets are loaded, so the mode suffix picks between its
         // two aspects. An NTSC build would load UiDataN* and use "nw"/"n4".
         const char *texMode = wide ? "pw" : "p4";
-        const float sx = (float)w / (wide ? kAuthorW : 640.0f);
-        const float sy = (float)h / (wide ? kAuthorH : 480.0f);
 
+        // Where the UI lands, out of `FUN_001B38C0` -- the one function every
+        // 2D widget goes through. Its two magic constants say what the space
+        // is:
+        //
+        //     widescreen:  x *= 0.5626374          = 512/910
+        //     4:3:         x  = (x - 114.0) * 0.75073314 = 512/682,
+        //                  and 114 = (910 - 682) / 2
+        //
+        // So the screens are authored **910 wide** -- the same 910x512 the
+        // background movies are -- and the PS2 squeezes that into its 512-wide
+        // framebuffer; 4:3 crops the middle 682 of the 910 first. **Only x and
+        // width are scaled.** y and height are passed through untouched, which
+        // means they are already in framebuffer rows.
+        //
+        // 1280x720 was an assumption and it was wrong on both axes.
+        const float kUiSqueeze = wide ? 512.0f / 910.0f : 512.0f / 682.0f;
+        const float kUiCrop    = wide ? 0.0f : 114.0f;
+        float uiX, uiY, uiW, uiH;
+        {
+            const float ar = wide ? 16.0f / 9.0f : 4.0f / 3.0f;
+            const float winAR = (float)w / (float)h;
+            if (winAR >= ar) { uiH = (float)h; uiW = uiH * ar; uiY = 0.0f; uiX = ((float)w - uiW) * 0.5f; }
+            else             { uiW = (float)w; uiH = uiW / ar; uiX = 0.0f; uiY = ((float)h - uiH) * 0.5f; }
+        }
+        const float uiPX = uiW / 512.0f, uiPY = uiH / 448.0f;
+
+        // Only the main menu is an XML screen. Nothing in the boot table draws
+        // one: `bootmenu.xml` exists in the archive but the front-end object
+        // never opens it, and an earlier version of this file put it up as a
+        // "Loading" stage that the state table does not have.
         const UI::Element *scr = nullptr;
         std::string activeId;
-        if (front.Stage() == Game::BootStage::MainMenu) {
+        if (inMenu) {
             scr = front.Menu().Screen();
             activeId = front.Menu().ActiveId();
-        } else if (front.Stage() == Game::BootStage::Loading) {
-            scr = bootScreen;
         }
+        (void)bootScreen;
 
         if (scr) {
             {
@@ -822,7 +1024,10 @@ int main(int argc, char **argv) {
                 bool drewBg = false;
 #ifdef CLIMAX_HAVE_FFMPEG
                 if (haveVideoSupport && menuVideo.IsOpen()) {
-                    painter.Quad(0, 0, (float)w, (float)h, menuVideo.Texture(),
+                    // Into the same rect the widgets map onto: the movie *is*
+                    // the 910x512 space they are authored over, so they only
+                    // line up if both go through the same fit.
+                    painter.Quad(uiX, uiY, uiW, uiH, menuVideo.Texture(),
                                 1, 1, 1, 1);
                     drewBg = true;
                 }
@@ -841,10 +1046,15 @@ int main(int argc, char **argv) {
                     painter.Quad(0, 0, (float)w, (float)h, 0, 0.02f, 0.02f, 0.03f, 1.0f);
 
                 for (const UI::Element &b : scr->children) {
-                    const float bx = (wide ? b.Float("xpos") : b.Float("xpos4x3")) * sx;
-                    const float by = (wide ? b.Float("ypos") : b.Float("ypos4x3")) * sy;
-                    const float bw = b.Float("width") * sx;
-                    const float bh = b.Float("height") * sy;
+                    // `xpos4x3`/`ypos4x3` are an override, not a second unit:
+                    // FUN_001B5410 seeds them from `xpos`/`ypos` and only
+                    // replaces them when the attribute is present.
+                    const float ax = wide ? b.Float("xpos") : b.Float("xpos4x3");
+                    const float ay = wide ? b.Float("ypos") : b.Float("ypos4x3");
+                    const float bx = uiX + (ax - kUiCrop) * kUiSqueeze * uiPX;
+                    const float by = uiY + ay * uiPY;
+                    const float bw = b.Float("width") * kUiSqueeze * uiPX;
+                    const float bh = b.Float("height") * uiPY;
 
                     const bool active = !activeId.empty() && b.Attr("id") == activeId;
                     const float k = active ? 1.0f : 0.5f;
@@ -857,10 +1067,19 @@ int main(int argc, char **argv) {
                     if (!tex.empty())
                         if (auto it = textures.find(tex); it != textures.end())
                             id = it->second;
-                    if (id)
-                        painter.Quad(bx, by, bw, bh, id, k, k, k, 1.0f,
-                                     b.Float("textureu", 0.0f), b.Float("texturev", 0.0f),
-                                     b.Float("texturew", 1.0f), b.Float("textureh", 1.0f));
+                    if (id) {
+                        float u0 = b.Float("textureu", 0.0f), v0 = b.Float("texturev", 0.0f);
+                        float u1 = b.Float("texturew", 1.0f), v1 = b.Float("textureh", 1.0f);
+                        // `rotation` is radians. The only value the screens use
+                        // is -pi -- the right-hand arrow is the left-hand one
+                        // turned round -- and a half turn is the UVs swapped on
+                        // both axes, no matrix needed.
+                        if (std::fabs(b.Float("rotation", 0.0f)) > 3.0f) {
+                            std::swap(u0, u1);
+                            std::swap(v0, v1);
+                        }
+                        painter.Quad(bx, by, bw, bh, id, k, k, k, 1.0f, u0, v0, u1, v1);
+                    }
 
                     // Text, if it names a string. Never the element id: that is
                     // a name for the designer, not a label for the player.
@@ -868,9 +1087,21 @@ int main(int argc, char **argv) {
                     if (!sid.empty()) {
                         const std::string label = strings.Text(sid);
                         if (!label.empty()) {
-                            const float tscale = sy * 1.1f;
-                            const float tx = bx + b.Float("textoffx") * sx;
-                            const float ty = by + b.Float("textoffy") * sy + bh * 0.8f;
+                            // `textsize` is on the element, in the same rows
+                            // as the front end's 16 and 14; only fall back to
+                            // 16 when the screen does not say.
+                            const float tscale =
+                                b.Float("textsize", 16.0f) * uiPY / kFontNativeH;
+                            float tx = bx + b.Float("textoffx") * kUiSqueeze * uiPX;
+                            const float ty = by + b.Float("textoffy") * uiPY + bh * 0.8f;
+                            // `justification` is an attribute too, and ignoring
+                            // it is what pushed the newgame labels left into
+                            // the logo.
+                            const std::string just = b.Attr("justification");
+                            if (just == "centre" || just == "center")
+                                tx += (bw - measure(label, tscale)) * 0.5f;
+                            else if (just == "right")
+                                tx += bw - measure(label, tscale);
                             drawText(tx, ty, tscale, label, k, k, k, 1.0f, false);
                         }
                     }
@@ -881,7 +1112,7 @@ int main(int argc, char **argv) {
             // not decoded yet, so each stage says what it is and what it wants.
             // The text is the game's own, out of Strings.Eng where there is one.
             const float cx = w * 0.5f;
-            const float sc = (wide ? sy : sy) * 1.6f;
+            const float sc = uiPY * 1.6f;   // only the "no clip" fallback text
             auto tex = [&](const std::string &n) -> GLuint {
                 auto it = textures.find(n);
                 return it == textures.end() ? 0 : it->second;
@@ -985,22 +1216,113 @@ int main(int argc, char **argv) {
                 return true;
             };
 
-            switch (front.Stage()) {
-            case Game::BootStage::Logo: {
-                // LOGOW/LOGON is one clip covering both the publisher/developer
-                // idents and the content notice -- there is no separate warning
-                // asset in the archive, so there is no separate drawing path
-                // for it either.
+            // The background under the language, memory-card and aspect states
+            // is one looping movie -- "Back" -- put up when the first of them
+            // is entered and taken down when the aspect state exits. It is not
+            // per-screen art, which is why nothing here reopens it.
+            auto backdrop = [&](const char *still) {
                 bool drew = false;
 #ifdef CLIMAX_HAVE_FFMPEG
-                if (haveVideoSupport && logoVideo.IsOpen())
-                    drew = fullscreenVideo(logoVideo.Texture(), logoVideo.Width(),
-                                           logoVideo.Height());
+                if (haveVideoSupport && bgVideo.IsOpen())
+                    drew = fullscreenVideo(bgVideo.Texture(), bgVideo.Width(),
+                                           bgVideo.Height());
+#endif
+                if (!drew && still)
+                    drew = fullscreen(std::string(still) + texMode);
+                return drew;
+            };
+
+            const Game::MenuTint on = Game::SelectedTint();
+            const Game::MenuTint off = Game::UnselectedTint();
+            const Game::TextRect head = Game::HeadingRect();
+
+            switch (front.Kind()) {
+            case Game::BootKind::Language: {
+                backdrop("sho_lang_bd_");
+
+                // FUN_00151918 draws two things and nothing else: the heading,
+                // and the row.
+                //
+                // The heading is *not* a string-table id. It is descriptor
+                // word 0 of the language under the cursor -- the language's own
+                // name, written in that language -- which is why it changes as
+                // the cursor moves, and why FUN_00151E98 re-points the current
+                // language on the move rather than on accept.
+                uiText(head.x, head.y, head.w, head.h, head.size,
+                       Game::LanguageOwnName(front.SelectedLanguage()),
+                       on.r, on.g, on.b, on.a);
+
+                // Five 80x60 quads on one line, first at (32,192), 92 apart.
+                // Selected is drawn white and the rest at 0xC8505050 -- the
+                // original tints the flag itself rather than putting a frame
+                // around it, so there is no sho_flg_sel here.
+                const Game::FlagRowLayout row = Game::LanguageRow();
+                const int n = Game::LanguageCount();
+                for (int i = 0; i < n; ++i) {
+                    const auto lang = (Game::Language)i;
+                    const bool sel = i == front.Cursor();
+                    GLuint id = tex(Game::LanguageFlag(lang));
+                    // Some sets ship a pre-lit "_h" variant; prefer it when the
+                    // entry is selected, and fall back to tinting.
+                    if (sel)
+                        if (const GLuint hi = tex(std::string(Game::LanguageFlag(lang)) + "_h"))
+                            id = hi;
+                    const Game::MenuTint t = sel ? on : off;
+                    uiQuad(row.x + i * row.step, row.y, row.w, row.h, id,
+                           t.r, t.g, t.b, t.a);
+                }
+                break;
+            }
+
+            case Game::BootKind::MemoryCard:
+                // FUN_001D3AD0 queues the card check and draws nothing of its
+                // own; the "Back" movie is still up behind it. With no card to
+                // read this record completes on its first frame, so this branch
+                // is normally never seen.
+                backdrop("sho_lang_bd_");
+                break;
+
+            case Game::BootKind::Aspect: {
+                // Two entries, one under the other, and they are *text*:
+                // FUN_00151FB8 passes `display_4x3` and `display_ws` through the
+                // string table rather than looking up a texture. Same two
+                // colours as the flag row.
+                backdrop("sho_aspect_");
+                // Every word here is the game's. FUN_00151FB8 passes the string
+                // id at 0x6929E0 -- `display_title` -- for the heading, and the
+                // two entries come from the 8-byte records at 0x00338A98.
+                // Coordinates out of .data: the heading rect is 0x00338A48 =
+                // (0,128,512,32) at size 0x00338A3C = 16, the list rect is
+                // 0x00338AA8 = (0,192,512,32) at size 0x00338A40 = 14, and the
+                // loop advances y by that size twice per row -- 28.
+                uiText(head.x, head.y, head.w, head.h, head.size,
+                       strings.Text("display_title"), on.r, on.g, on.b, on.a);
+                const Game::TextRect rowRect = Game::AspectRowRect();
+                for (int i = 0; i < Game::AspectCount(); ++i) {
+                    const Game::MenuTint t = i == front.Cursor() ? on : off;
+                    uiText(rowRect.x, rowRect.y + i * Game::AspectRowStep(),
+                           rowRect.w, rowRect.h, rowRect.size,
+                           strings.Text(Game::AspectStringId(i)),
+                           t.r, t.g, t.b, t.a);
+                }
+                break;
+            }
+
+            case Game::BootKind::Movie: {
+                // The "Logo" record. LOGOW/LOGON is one clip covering both the
+                // publisher/developer idents and the content notice -- there is
+                // no separate warning asset in the archive, so there is no
+                // separate drawing path for it either.
+                bool drew = false;
+#ifdef CLIMAX_HAVE_FFMPEG
+                if (haveVideoSupport && bgVideo.IsOpen())
+                    drew = fullscreenVideo(bgVideo.Texture(), bgVideo.Width(),
+                                           bgVideo.Height());
 #endif
                 if (!drew) {
-                    // No video decoder in this build, or the clip failed to
-                    // open: say so rather than drawing an invented logo, which
-                    // read as the toolkit's own branding rather than the game's.
+                    // No decoder in this build, or the clip failed to open: say
+                    // so rather than drawing an invented logo, which read as the
+                    // toolkit's own branding rather than the game's.
                     centre(cx, h * 0.48f, sc, "Silent Hill Origins",
                           0.55f, 0.55f, 0.6f, 1.0f);
                     centre(cx, h * 0.58f, sc * 0.6f, "(LOGOW.mp4 not found)",
@@ -1008,71 +1330,7 @@ int main(int argc, char **argv) {
                 }
                 break;
             }
-            case Game::BootStage::Loading:
-                // splash_p4.jpg carries the logo and the copyright block baked
-                // in; "loading" is not part of the picture, it is the string
-                // `loading` drawn over it. Its position is the one thing here
-                // still eyeballed -- this screen's drawing code has not been
-                // found, so there are no coordinates to copy.
-                fullscreen("splash_p4", 4.0f / 3.0f);
-                uiText(0, 268, 512, 32, 16.0f, strings.Text("loading"),
-                       1.0f, 1.0f, 1.0f, 1.0f);
-                break;
-
-            case Game::BootStage::LanguageSelect: {
-                fullscreen(std::string("sho_lang_bd_") + texMode);
-
-                // The layout is the game's, out of FUN_00151918: five 80x60
-                // quads on one line, first at (32,192), 92 apart. Selected is
-                // drawn white and the rest at 0xC8505050 -- the original tints
-                // the flag itself rather than putting a frame around it, so
-                // there is no sho_flg_sel here.
-                const Game::FlagRowLayout row = Game::LanguageRow();
-                const int n = Game::LanguageCount();
-                for (int i = 0; i < n; ++i) {
-                    const auto lang = (Game::Language)i;
-                    const bool sel = i == front.languageIndex;
-                    GLuint id = tex(Game::LanguageFlag(lang));
-                    // Some sets ship a pre-lit "_h" variant; prefer it when the
-                    // entry is selected, and fall back to tinting.
-                    if (sel)
-                        if (const GLuint hi = tex(std::string(Game::LanguageFlag(lang)) + "_h"))
-                            id = hi;
-                    const float k = sel ? 1.0f : 0x50 / 255.0f;
-                    const float a = sel ? 1.0f : 0xC8 / 255.0f;
-                    uiQuad(row.x + i * row.step, row.y, row.w, row.h, id, k, k, k, a);
-                }
-                break;
-            }
-
-            case Game::BootStage::AspectSelect: {
-                // Two entries, one under the other, and they are *text*:
-                // FUN_00151fb8 passes `display_4x3` and `display_ws` through the
-                // string table rather than looking up a texture. Same two
-                // colours as the flag row.
-                fullscreen(std::string("sho_aspect_") + texMode);
-                // Every word here is the game's. FUN_00151fb8 passes the string
-                // id at 0x6929E0 -- `display_title` -- for the heading, and the
-                // two entries are `display_4x3` and `display_ws` through the
-                // same string table. Typing "4:3" and "16:9" in by hand was
-                // wrong even when the letters happened to come out the same.
-                // Coordinates out of .data, not out of my head: the heading
-                // rect is 0x00338A48 = (0,128,512,32) at size 0x00338A3C = 16,
-                // the list rect is 0x00338AA8 = (0,192,512,32) at size
-                // 0x00338A40 = 14, and FUN_00151fb8 advances y by that size
-                // twice per row -- 28.
-                uiText(0, 128, 512, 32, 16.0f, strings.Text("display_title"),
-                       1.0f, 1.0f, 1.0f, 1.0f);
-                for (int i = 0; i < 2; ++i) {
-                    const bool sel = (i == 1) == front.widescreen;
-                    const float k = sel ? 1.0f : 0x50 / 255.0f;
-                    uiText(0, 192.0f + i * 28.0f, 512, 32, 14.0f,
-                           strings.Text(i == 0 ? "display_4x3" : "display_ws"),
-                           k, k, k, sel ? 1.0f : 0xC8 / 255.0f);
-                }
-                break;
-            }
-            default:
+            case Game::BootKind::Leave:
                 break;
             }
         }
