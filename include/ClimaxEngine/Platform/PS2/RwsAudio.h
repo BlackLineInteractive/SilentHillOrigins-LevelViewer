@@ -88,6 +88,7 @@ public:
     // the SFX voice.  Loading is done off the lock; only the swap is locked.
     void PlayMusic(const AudioClip& clip, float volume = 0.6f);
     void StopMusic();
+    void PauseMusic(bool pause);
     bool IsMusicPlaying() const;
 
     // Called by SDL audio callback — do not call directly.

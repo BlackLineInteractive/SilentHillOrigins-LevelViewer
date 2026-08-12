@@ -79,14 +79,31 @@ void ProcessAndUploadTexture(RawTexture& raw) {
     if (raw.depth == 8) {
         indices = Unswizzle8(raw.pixels, w, h);
     } else if (raw.depth == 4) {
-        // Unpack nibbles to a byte-per-pixel buffer, then deswizzle at full w×h.
-        std::vector<uint8_t> unpacked(w * h, 0);
-        for (size_t i = 0; i < raw.pixels.size(); i++) {
-            uint8_t val = raw.pixels[i];
-            if (i * 2     < unpacked.size()) unpacked[i * 2]     = val & 0xF;
-            if (i * 2 + 1 < unpacked.size()) unpacked[i * 2 + 1] = (val >> 4) & 0xF;
+        indices.assign(w * h, 0);
+        int padded_w = std::max(w, 32);
+        
+        int logw = 0;
+        for (int i = 1; i < padded_w; i *= 2) logw++;
+        uint32_t mask = (1 << (logw + 2)) - 1;
+        
+        for (int y = 0; y < h; y += 4) {
+            for (int i = 0; i < 4; i++) {
+                if (y + i >= h) break;
+                for (int x = 0; x < w; x++) {
+                    uint32_t xx = x ^ (((((y+i) >> 1) & 1) ^ (((y+i) >> 2) & 1)) << 2);
+                    uint32_t nx = (xx & 7) | ((xx >> 1) & ~7u);
+                    uint32_t ny = ((y+i) & 1) | (((y+i) >> 1) & ~1u);
+                    uint32_t n = (((y+i) >> 1) & 1) | (((xx >> 3) & 1) << 1);
+                    uint32_t s = (n | (nx << 2) | (ny << (logw + 1))) & mask;
+                    
+                    uint32_t byte_idx = (y * padded_w / 2) + (s >> 1);
+                    if (byte_idx < raw.pixels.size()) {
+                        uint8_t c = (s & 1) ? (raw.pixels[byte_idx] >> 4) : (raw.pixels[byte_idx] & 0xF);
+                        indices[(y + i) * w + x] = c;
+                    }
+                }
+            }
         }
-        indices = Unswizzle8(unpacked, w, h);
     }
 
     // The GS stores 256-entry CLUTs interleaved; 16-entry ones are linear.

@@ -278,6 +278,13 @@ void CAudioRelay::StopMusic() {
     SDL_UnlockAudioDevice(m_device);
 }
 
+void CAudioRelay::PauseMusic(bool pause) {
+    if (!m_device) return;
+    SDL_LockAudioDevice(m_device);
+    m_music.Pause(pause);
+    SDL_UnlockAudioDevice(m_device);
+}
+
 bool CAudioRelay::IsMusicPlaying() const {
     return m_music.IsPlaying();
 }
