@@ -179,6 +179,8 @@ public:
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, kW, 512, 0, GL_RGBA,
                      GL_UNSIGNED_BYTE, rgba.data());
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
@@ -481,6 +483,8 @@ int main(int argc, char **argv) {
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE,
                      rgba.data());
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
@@ -899,7 +903,8 @@ int main(int argc, char **argv) {
         if (keys[SDL_SCANCODE_TAB])    buttons |= Game::Pad::Start;
 
         const uint64_t now = SDL_GetPerformanceCounter();
-        const float dt = (float)((now - last) / (double)SDL_GetPerformanceFrequency());
+        float dt = (float)((now - last) / (double)SDL_GetPerformanceFrequency());
+        if (dt > 0.05f) dt = 0.05f; // Clamp to avoid video skipping ahead of audio on lag spikes
         last = now;
 
         int w, h;
@@ -952,10 +957,19 @@ int main(int argc, char **argv) {
 
 #ifdef CLIMAX_HAVE_FFMPEG
         if (haveVideoSupport && inMenu) {
-            // mainmenu.xml asks for `bgmovie="Menu"` with loop_movie="true".
-            if (!menuVideo.IsOpen()) {
+            const UI::Element *scr = front.Menu().Screen();
+            std::string requestedMovie = scr ? scr->Attr("bgmovie") : "";
+            
+            static std::string currentMenuMovie;
+            if (requestedMovie.empty() && currentMenuMovie.empty()) {
+                requestedMovie = "MENU"; // Initial fallback
+            }
+
+            if (!requestedMovie.empty() && currentMenuMovie != requestedMovie) {
+                menuVideo.Close();
+                currentMenuMovie = requestedMovie;
                 const std::string p = ResolveMoviePath(
-                    moviesDir, "MENU", host.displayMode != 0,
+                    moviesDir, requestedMovie, host.displayMode != 0,
                     (Game::Language)host.language);
                 if (!p.empty() && menuVideo.Open(p))
                     std::fprintf(stderr, "[play] menu video: %s (%dx%d)\n",
@@ -1075,8 +1089,10 @@ int main(int argc, char **argv) {
                         // turned round -- and a half turn is the UVs swapped on
                         // both axes, no matrix needed.
                         if (std::fabs(b.Float("rotation", 0.0f)) > 3.0f) {
+                            // Let's just flip the X coordinates of the quad itself, instead of UVs?
+                            // Actually, let's just see if UVs were the problem. I'll leave this empty to test if rotation caused the noise.
                             std::swap(u0, u1);
-                            std::swap(v0, v1);
+                            // std::swap(v0, v1); // Try just swapping U, maybe swapping V breaks it?
                         }
                         painter.Quad(bx, by, bw, bh, id, k, k, k, 1.0f, u0, v0, u1, v1);
                     }
