@@ -162,6 +162,13 @@ std::string LoadArcPref() {
 // overlay reads them to draw the prompt; the step writes them.
 static int         s_zoneLinkHere = -1;
 static std::string s_zonePrompt;
+
+// ── MessageBox and SavePoint state ───────────────────────────────────────────
+static bool        s_showMessageBox = false;
+static std::string s_messageBoxText;
+static float       s_messageBoxTimer = 0.0f;
+static bool        s_showSaveMenu = false;
+
 // Set by the key handler, consumed and cleared by the step, so a single press
 // travels once instead of once per frame it is held.
 static bool        s_useDoorPressed = false;
@@ -1140,21 +1147,35 @@ void main(){
                     // an event on action key press. We'll use the objName as prompt.
                     s_zonePrompt = buttonTriggers[(size_t)s_buttonTriggerHere].objName;
                     if (s_useDoorPressed) {
-                        // For a teleport, load the target map
                         const auto& btn = buttonTriggers[(size_t)s_buttonTriggerHere];
-                        if (!btn.targetMap.empty()) {
-                            auto *arc = ClimaxEngine::RWS::FileSystem::
-                                CArchiveManager::GetInstance().GetFirstArchive();
-                            const int idx = arc ? arc->Find(btn.targetMap) : -1;
-                            if (idx >= 0) {
-                                arrivedFrom = btn.eventName; 
-                                std::cout << "[trigger] Teleporting to " << btn.targetMap << "\n";
-                                LoadLevelFromArc(idx);
+                        
+                        if (btn.className == "MessageBoxTrigger") {
+                            s_showMessageBox = true;
+                            // the eventName usually holds the string ID or similar reference
+                            s_messageBoxText = btn.eventName.empty() ? btn.objName : btn.eventName;
+                            s_messageBoxTimer = 3.0f; // show for 3 seconds
+                            std::cout << "[MessageBox] " << s_messageBoxText << "\n";
+                        } 
+                        else if (btn.className == "SavePoint") {
+                            s_showSaveMenu = true;
+                            std::cout << "[SavePoint] Opening save menu\n";
+                        }
+                        else {
+                            // ButtonBoxTrigger / teleports / etc.
+                            if (!btn.targetMap.empty()) {
+                                auto *arc = ClimaxEngine::RWS::FileSystem::
+                                    CArchiveManager::GetInstance().GetFirstArchive();
+                                const int idx = arc ? arc->Find(btn.targetMap) : -1;
+                                if (idx >= 0) {
+                                    arrivedFrom = btn.eventName; 
+                                    std::cout << "[trigger] Teleporting to " << btn.targetMap << "\n";
+                                    LoadLevelFromArc(idx);
+                                } else {
+                                    std::cerr << "[trigger] map " << btn.targetMap << " not found in ARC\n";
+                                }
                             } else {
-                                std::cerr << "[trigger] map " << btn.targetMap << " not found in ARC\n";
+                                std::cerr << "[trigger] Interact with " << btn.objName << " (event: " << btn.eventName << ")\n";
                             }
-                        } else {
-                            std::cerr << "[trigger] Interact with " << btn.objName << " (event: " << btn.eventName << ")\n";
                         }
                     }
                 }
@@ -2397,6 +2418,43 @@ void main(){
                               ImVec2(at.x + sz.x + 12.0f, at.y + sz.y + 6.0f),
                               IM_COL32(0, 0, 0, 150), 4.0f);
             dl->AddText(at, IM_COL32(235, 235, 245, 255), buf);
+        }
+
+        // ── MessageBox Render ───────────────────────────────────────────────
+        if (s_showMessageBox) {
+            s_messageBoxTimer -= ImGui::GetIO().DeltaTime;
+            if (s_messageBoxTimer <= 0.0f) {
+                s_showMessageBox = false;
+            } else {
+                auto* dl = ImGui::GetForegroundDrawList();
+                const ImVec2 sz = ImGui::CalcTextSize(s_messageBoxText.c_str());
+                const ImVec2 at((winW - sz.x) * 0.5f, (float)winH * 0.85f);
+                dl->AddRectFilled(ImVec2(at.x - 20.0f, at.y - 12.0f),
+                                  ImVec2(at.x + sz.x + 20.0f, at.y + sz.y + 12.0f),
+                                  IM_COL32(20, 20, 30, 220), 8.0f);
+                dl->AddRect(ImVec2(at.x - 20.0f, at.y - 12.0f),
+                            ImVec2(at.x + sz.x + 20.0f, at.y + sz.y + 12.0f),
+                            IM_COL32(200, 200, 200, 100), 8.0f);
+                dl->AddText(at, IM_COL32(255, 255, 255, 255), s_messageBoxText.c_str());
+            }
+        }
+
+        // ── SavePoint Render ────────────────────────────────────────────────
+        if (s_showSaveMenu) {
+            ImGui::SetNextWindowPos(ImVec2((float)winW * 0.5f, (float)winH * 0.5f), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+            if (ImGui::Begin("Save Point", &s_showSaveMenu, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) {
+                ImGui::Text("Would you like to save your progress?");
+                ImGui::Separator();
+                if (ImGui::Button("Save Game", ImVec2(120, 30))) {
+                    std::cout << "[SavePoint] Game Saved! (Dummy)\n";
+                    s_showSaveMenu = false;
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Cancel", ImVec2(120, 30))) {
+                    s_showSaveMenu = false;
+                }
+            }
+            ImGui::End();
         }
 
         // Decide who owns the mouse for the *next* frame's event loop. Panels and

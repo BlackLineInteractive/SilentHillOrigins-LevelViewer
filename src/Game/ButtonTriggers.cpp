@@ -25,7 +25,9 @@ std::vector<ButtonTrigger> BuildButtonTriggers(const std::vector<GameObject>& ob
     for (const GameObject& go : objects) {
         if (go.className != "ButtonBoxTrigger" && 
             go.className != "ButtonTrigger" && 
-            go.className != "CDistortionTrigger") {
+            go.className != "CDistortionTrigger" &&
+            go.className != "MessageBoxTrigger" &&
+            go.className != "SavePoint") {
             continue;
         }
         
