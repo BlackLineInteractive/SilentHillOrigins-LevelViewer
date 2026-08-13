@@ -161,6 +161,7 @@ target_link_libraries(climax-core PUBLIC ZLIB::ZLIB glm::glm)
 # Game logic: character controller, cameras, triggers, export.
 add_library(climax-game STATIC
     src/Game/CameraLinks.cpp
+    src/Game/SceneQueue.cpp
     src/Game/CharacterController.cpp
     src/Game/ZoneLinks.cpp
     src/Game/ButtonTriggers.cpp

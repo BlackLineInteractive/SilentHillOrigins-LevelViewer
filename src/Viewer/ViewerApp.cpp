@@ -873,6 +873,24 @@ int ViewerApp::Run(int argc, char* argv[]) {
 
         glm::vec3 viewDir(-view[0][2], -view[1][2], -view[2][2]);
         
+        // The level's placed lights. CColorLight is parsed by the loader and
+        // was thrown away: nothing read `go.isLight`. Its placement matrix sits
+        // in the object's fourth component, not its first, so `go.position`
+        // stays at the origin -- which is why every light in HO_1_ExamRoom sat
+        // outside the room.
+        m_Graphics.lightPos.clear();
+        m_Graphics.lightCol.clear();
+        m_Graphics.lightRange.clear();
+        m_Graphics.lightType.clear();
+        for (const auto& go : g_GameObjects) {
+            if (!go.isLight) continue;
+            if (m_Graphics.lightPos.size() >= 16) break;
+            m_Graphics.lightPos.push_back(go.haveLightPos ? go.lightPos : go.position);
+            m_Graphics.lightCol.push_back(go.lightColor);
+            m_Graphics.lightRange.push_back(go.lightRange);
+            m_Graphics.lightType.push_back(go.lightType);
+        }
+
         // Native Fog Extraction
         if (state.useNativeFog) {
             for (const auto& go : g_GameObjects) {
@@ -1464,6 +1482,9 @@ int ViewerApp::Run(int argc, char* argv[]) {
         }
         
         if (ImGui::CollapsingHeader("Environment (Fog)")) {
+            ImGui::Checkbox("Level lights (CColorLight)", &state.enableLights);
+            if (state.enableLights)
+                ImGui::SliderFloat("Light strength", &state.lightIntensity, 0.0f, 2.0f);
             ImGui::Checkbox("Use Native Fog (CFogConfig)", &state.useNativeFog);
             ImGui::Checkbox("Enable Fog", &state.enableFog);
             if (state.enableFog) {

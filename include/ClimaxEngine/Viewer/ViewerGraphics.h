@@ -18,6 +18,12 @@ public:
     void Shutdown();
 
 public:
+    // Filled once per level by ViewerApp from the CColorLight objects.
+    std::vector<glm::vec3> lightPos;
+    std::vector<glm::vec3> lightCol;
+    std::vector<float>     lightRange;
+    std::vector<int>       lightType;
+
     GLuint p = 0;
     GLuint uiP = 0;
     GLuint solidP = 0;

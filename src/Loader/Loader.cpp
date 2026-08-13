@@ -791,6 +791,13 @@ static void ParseGameObject(const std::vector<uint8_t> &data, size_t off,
         }
         lastIdx = (long)idx;
 
+        // The placement matrix, wherever its component sits.
+        if (payLen == 64) {
+          glm::mat4 mx;
+          memcpy(&mx, &data[payOff], 64);
+          go.lightPos = glm::vec3(mx[3]);
+          go.haveLightPos = true;
+        }
         if (payLen == 4) {
           float f;
           memcpy(&f, &data[payOff], 4);

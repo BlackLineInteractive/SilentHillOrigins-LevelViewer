@@ -247,6 +247,12 @@ struct GameObject {
   // CColorLight payload. Component 1 property 0 is an RGBA colour; component 2
   // carries [type][cone angle in degrees][range][enabled].
   bool isLight = false;
+  // Where the light actually stands. A CColorLight keeps its placement matrix
+  // in its *fourth* component, not its first, so the generic placement pass
+  // never sees it and `position` stays at the origin -- which put every light
+  // in HO_1_ExamRoom outside the room and made the room look unlit.
+  glm::vec3 lightPos = glm::vec3(0.0f);
+  bool haveLightPos = false;
   glm::vec3 lightColor = glm::vec3(1.0f);
   float lightRange = 10.0f;
   float lightAngle = 45.0f; // >180 means omnidirectional

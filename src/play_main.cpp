@@ -30,6 +30,7 @@
 #include "ClimaxEngine/Core/UI/ScreenDef.h"
 #include "ClimaxEngine/Core/UI/StringTable.h"
 #include "ClimaxEngine/Game/FrontEnd.h"
+#include "ClimaxEngine/Game/SceneQueue.h"
 #include "ClimaxEngine/Platform/PS2/AudioParser.h"
 #include "ClimaxEngine/Platform/PS2/PS2Texture.h"
 #include "ClimaxEngine/Platform/PS2/RwsAudio.h"
@@ -1127,6 +1128,75 @@ int main(int argc, char **argv) {
   float introFade = 0.0f;      // 1 = fully black
   bool introFadingOut = false; // going down; false while coming back up
   bool introPending = false;   // accepted, waiting for black
+
+  // ── the scene queue ─────────────────────────────────────────────────────
+  //
+  // FUN_001CF718 ends with FUN_00179FB8(world, "IntroRoad", ...), so when the
+  // intro clip is over the game is already asking for its first scene. The
+  // queue below is the transcription of that; this host is what it drives.
+  Game::SceneQueue sceneQueue;
+  struct PlaySceneHost : Game::SceneQueueHost {
+      RWS::FileSystem::CArchive *arc = nullptr;
+      float *fade = nullptr;          // the same black the intro uses
+      std::vector<uint8_t> raw;       // the scene container, as read
+      std::string scene;
+      float t = 0.0f;
+
+      bool FadeOut(float secs) override {
+          t += 1.0f / 60.0f;
+          *fade = std::min(1.0f, t / std::max(secs, 0.01f));
+          if (*fade < 1.0f) return false;
+          t = 0.0f;
+          return true;
+      }
+      bool FadeIn(float secs) override {
+          t += 1.0f / 60.0f;
+          *fade = 1.0f - std::min(1.0f, t / std::max(secs, 0.01f));
+          if (*fade > 0.0f) return false;
+          t = 0.0f;
+          return true;
+      }
+      bool ClearWorld() override { raw.clear(); return true; }
+      bool ReleaseResources() override { return true; }
+      bool FinishTeardown() override { return true; }
+      bool OpenArchive(const std::string &name) override {
+          scene = name;
+          // FUN_0017B398 formats "%s.ARC"; on this disc the scenes are entries
+          // of SH.ARC rather than files beside it, so the entry name is the
+          // scene name itself.
+          if (arc && ReadEntry(*arc, name.c_str(), raw)) {
+              std::fprintf(stderr, "[scene] %s: %zu bytes\n", name.c_str(), raw.size());
+              return true;
+          }
+          std::fprintf(stderr, "[scene] %s: not in the archive\n", name.c_str());
+          return true;   // do not wedge the queue on a missing scene
+      }
+      bool ReadHeader() override { return true; }
+      bool Prepare() override { return true; }
+      bool Instantiate(const std::string &name) override {
+          // Where the world would be built. climax-play has no 3D pass yet, so
+          // this is the honest edge of the port: the bytes are in `raw` and
+          // nothing turns them into a scene.
+          std::fprintf(stderr, "[scene] instantiate %s -- not implemented\n",
+                       name.c_str());
+          return true;
+      }
+      bool FreeTemporaries() override { return true; }
+      bool ResetSystems() override { return true; }
+      bool StartLevelAudio() override { return true; }
+      bool HandOver() override {
+          std::fprintf(stderr, "[scene] %s up, control handed over\n", scene.c_str());
+          return true;
+      }
+      bool Unread(Game::SceneCmd c) override {
+          std::fprintf(stderr, "[scene] %s: unread command, skipped\n",
+                       Game::SceneCmdName(c));
+          return true;
+      }
+  } sceneHost;
+  sceneHost.arc = &arc;
+  sceneHost.fade = &introFade;
+  bool sceneStarted = false;
   // Screen-to-screen inside the menu goes through black too, the same way the
   // menu-to-intro handover does -- just faster, because it is a step sideways
   // rather than a handover to another part of the game.
@@ -1340,6 +1410,12 @@ int main(int argc, char **argv) {
         host.stopMovie();
         playingIntro = false;
         std::fprintf(stderr, "[play] intro finished\n");
+        // FUN_001CF718: new game -> the first scene.
+        if (!sceneStarted) {
+          sceneStarted = true;
+          sceneQueue.LoadScene("IntroRoad");
+          std::fprintf(stderr, "[scene] queue: IntroRoad\n");
+        }
       }
     }
     if (haveVideoSupport && inMenu) {
@@ -1392,6 +1468,10 @@ int main(int argc, char **argv) {
                 0.65f * currentMusicVolume);
         }
     }
+
+    // FUN_00179D60: one drain per frame.
+    if (sceneQueue.Busy())
+      sceneQueue.Update(sceneHost, dt);
 
     glViewport(0, 0, w, h);
     glClearColor(0.02f, 0.02f, 0.03f, 1.0f);

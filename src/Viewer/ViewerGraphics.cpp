@@ -1,4 +1,6 @@
 #include "ClimaxEngine/Viewer/ViewerGraphics.h"
+
+#include <algorithm>
 #include "ClimaxEngine/Viewer/ViewerDraw.h"
 #include "ClimaxEngine/Render/ViewerState.h"
 #include "ClimaxEngine/Render/PlayerModel.h"
@@ -88,6 +90,18 @@ uniform vec3  eyePos;
 uniform vec3  viewDir;
 uniform float depthMax;
 uniform bool  iceEffect;
+
+// Placed lights, from the level's CColorLight objects. There are no normals in
+// this vertex format, so this is radial falloff only -- the light reaches what
+// is near it and fades over its own range. That is what CColorLight carries:
+// a colour and a range, not a direction we could shade against.
+const int MAX_LIGHTS = 16;
+uniform int   lightCount;
+uniform vec3  lightPos[MAX_LIGHTS];
+uniform vec3  lightCol[MAX_LIGHTS];
+uniform float lightRange[MAX_LIGHTS];
+uniform int   lightType[MAX_LIGHTS];
+uniform float lightIntensity;
 
 uniform bool  enableFog;
 uniform vec3  fogColor;
@@ -198,6 +212,38 @@ void main(){
         col.rgb *= brightness;
         if(alphaOff) col.a = 1.0;
         FragColor = col;
+    }
+
+    // Lit before fog, so fog sits on top of the lit colour the way it does on
+    // the console. Modulating rather than adding keeps a texture's own colour:
+    // an unlit room stays as its baked vertex colour, a lit one is brightened.
+    // Only on surfaces with no baked light. A world surface already carries
+    // its lighting in the vertex colours, so adding CColorLight on top of it
+    // lights the room twice -- that is what turned HO_1_ExamRoom white.
+    // `unlitGeometry` marks the pieces whose vertex colours are all zero: those
+    // are the ones the engine has to light at run time, and they are what these
+    // placed lights are for.
+    if (lightCount > 0 && renderMode == 0 && unlitGeometry) {
+        vec3 lit = vec3(0.0);
+        for (int i = 0; i < lightCount; ++i) {
+            // The type is in the data and used to be ignored, so a fill light
+            // with a 1000-unit range was treated as a point light and drowned
+            // everything near it. Type 2 is the room's ambient term: no
+            // position, no falloff. The rest fall off over their own range.
+            if (lightType[i] == 2) {
+                lit += lightCol[i];
+                continue;
+            }
+            float d = distance(fragWorldPos, lightPos[i]);
+            float a = 1.0 - clamp(d / max(lightRange[i], 0.001), 0.0, 1.0);
+            lit += lightCol[i] * a * a;
+        }
+        // Clamped, then scaled. The first version multiplied the surface by
+        // the raw sum, so two lights could more than double it and the room
+        // came out white. A placed light in this game lifts a dark corner; it
+        // does not relight the scene.
+        lit = clamp(lit, 0.0, 1.0) * lightIntensity;
+        FragColor.rgb += FragColor.rgb * lit;
     }
 
     if (enableFog && renderMode != 4 && renderMode != 3 && renderMode != 5) {
@@ -330,6 +376,19 @@ void ViewerGraphics::RenderFrame(int fbW, int fbH, int winW, int winH, const glm
         glUniform1i(glGetUniformLocation(p, "renderMode"),   (int)state.renderMode);
         glUniform3f(glGetUniformLocation(p, "eyePos"),       eye.x, eye.y, eye.z);
         glUniform1f(glGetUniformLocation(p, "depthMax"),     state.camDist * 4.5f);
+        // The lights the level placed. Gathered by ViewerApp because it is the
+        // one that holds the object list.
+        {
+            const int n = (int)std::min<size_t>(lightPos.size(), 16);
+            glUniform1i(glGetUniformLocation(p, "lightCount"), state.enableLights ? n : 0);
+            if (n > 0) {
+                glUniform3fv(glGetUniformLocation(p, "lightPos"),   n, &lightPos[0].x);
+                glUniform3fv(glGetUniformLocation(p, "lightCol"),   n, &lightCol[0].x);
+                glUniform1fv(glGetUniformLocation(p, "lightRange"), n, &lightRange[0]);
+                glUniform1iv(glGetUniformLocation(p, "lightType"),  n, &lightType[0]);
+                glUniform1f(glGetUniformLocation(p, "lightIntensity"), state.lightIntensity);
+            }
+        }
 
         const GLint uM     = glGetUniformLocation(p, "m");
         const GLint uModel  = glGetUniformLocation(p, "model");

@@ -90,7 +90,10 @@ struct ViewerState {
   bool showUnplacedModels = false; // draw model sections no game object placed
   bool showUI = true;              // master switch for every panel (F1)
   bool useVertexColors = true;
-  float brightness = 1.3f;
+  // 1.0, not 1.3. The game has no such multiplier -- it was a viewer default
+  // that lifted every surface by a third, which is most of why a Silent Hill
+  // room looked like daylight.
+  float brightness = 1.0f;
   bool showCollision = false;      // overlay collision wireframe
   bool showCollisionSolid = false; // fill collision as solid semi-transparent
   bool showClumps = true;          // show clump object markers
@@ -149,6 +152,12 @@ struct ViewerState {
   bool iceShading = true;
 
   // Fog settings
+  bool  enableLights = true;   // the level's own CColorLight objects
+  // How much a placed light lifts the surface it reaches. Not read from the
+  // game -- CColorLight gives a colour and a range, and how the engine weighs
+  // that against the baked vertex colour is still unknown, so this is a knob
+  // rather than a constant pretending to be measured.
+  float lightIntensity = 1.0f;
   bool  enableFog = false;
   bool  useNativeFog = true;
   float fogColor[3] = {0.5f, 0.5f, 0.5f};

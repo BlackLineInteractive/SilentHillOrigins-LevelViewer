@@ -802,3 +802,58 @@ Italiano, Deutsch, Español, Japanese, Korean. `Strings.%s` takes the code;
 Still open: the 512x448 authored space is inferred, not read; `FontJAP` and the
 Japanese/Korean descriptors are unused by the PAL disc and untested; the memory
 card task is a no-op here, so its record completes on the first frame.
+
+### 6e. Property tables recovered for both executables
+
+`tools/attrmap.py` (Ghost Rider, unstripped) and `tools/sho_attrs.py` (Origins,
+stripped, reached through factory -> constructor -> vtable slot 7) were run
+against the retail binaries and their output is committed:
+
+    docs/generated/gr_attrmap.json    213 classes, 1159 properties, with names
+    docs/generated/sho_attrmap.json   126 classes, including the 63 Origins-only
+                                      ones Ghost Rider does not have
+
+That covers, with a field offset and a type per property, everything the level
+data places: `AreaTriggerBox`, `AreaTrigger2DPoly`, `ZoneTrigger`,
+`MessageBoxTrigger`, `ButtonBoxTrigger`, `ButtonTrigger`, `BackdropPropTrigger`
+(16 properties), `DataTrigger`, `PlaneTrigger`, `CFMVTrigger`, the spawners,
+`CStaticCamera` / `CFollowCamera` / `CameraPair`, `CBaseLight` / `CColorLight`,
+`AudioSound3D` / `AudioStream` / `AudioReverb`, `CAudioUI` (31 properties),
+`CBloomCfg` (22) and `CFogConfig` (19).
+
+**`CFogConfig` is confirmed, not guessed.** Its constructor is `FUN_0015F148`
+(the class is registered by `FUN_001606F8`, factory `FUN_00160770`, instance
+size 0xB8, all instances chained through `+0x44` off `DAT_00338B44`), and the
+defaults it writes line up one for one with the property table:
+
+    prop  2 -> +0x58 float   13.0     start
+    prop  3 -> +0x60 float   25.0     end
+    prop  5 -> +0x64 float    0.3     density
+    prop 10 -> +0x9C float    0.65    colour r
+    prop 11 -> +0xA0 float    1.0     colour g
+    prop  8 -> +0xA4 float    0.7     colour b
+    prop  1 -> +0x50/+0x54    1500
+
+`Loader.cpp` already reads exactly indices 2, 3, 5, 10, 11 and 8, so the fog
+path -- parse, `ViewerApp` -> `state`, shader mix in `ViewerGraphics.cpp` -- was
+right all along and is now backed by the executable rather than by inference.
+
+### 6f. The scene queue, and what "start the game properly" needs
+
+`FUN_00179FB8` does not load a scene. It **queues commands**: 0x1C-byte nodes
+pushed onto a linked list at `world + 0x18`, drained a frame at a time by
+`FUN_00179D60`, which switches on the node's id and stops as soon as a handler
+returns 0. Verified handlers: `FUN_0017A6B8` / `FUN_0017A7A8` (fade out / in,
+parameters from `0x339F68` / `0x339F50`), `FUN_0017B2E0`, `FUN_0017A900`,
+`FUN_0017B5B0`, `FUN_0017B398` (formats `%s.ARC` and reads the file),
+`FUN_0017B448`, `FUN_0017B488`, `FUN_0017B540` -> **`FUN_001777E8`** (the actual
+instantiation: nodes, lights, collision, triggers), `FUN_0017B848`,
+`FUN_0017B680`, `FUN_0017B890` -> **`FUN_001D9A38`** (level audio), and
+`FUN_0017B780`. The dispatcher also reaches `FUN_0017AA58`, `FUN_0017B510`,
+`FUN_0017B6C0` and `FUN_0017B7A0`, so the queue is wider than those fourteen.
+
+New game reaches it through `FUN_001CF718`, which resets 22 subsystems and calls
+`FUN_00179FB8(world, "IntroRoad", 0, 0, 0x339F50, 0x339F68, 0)`.
+
+Next: `FUN_001777E8` (lights -- this is why `examroom` renders dark) and
+`FUN_001D9A38` (level sound banks).
