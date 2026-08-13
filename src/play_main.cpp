@@ -413,6 +413,10 @@ bool FileExists(const std::string &p) {
 // Letter suffix a language adds to a movie's base name -- LOGOWF, GOMOVNS --
 // matching the disc's own naming (F/G/I/S; no suffix is English). Not every
 // base name has every language: MENU ships only MENUW/MENUN.
+// FUN_001F3048 appends **one** character -- the first of the language's
+// three-letter code (Eng, Fre, Ita, Ger, Spa) -- and falls back to the bare
+// name when that file is missing. English therefore has no suffix, because
+// "...E" does not exist on the disc and the fallback catches it.
 std::string MovieLangSuffix(Game::Language l) {
   switch (l) {
   case Game::Language::French:
@@ -493,7 +497,7 @@ int main(int argc, char **argv) {
   // number in that formula I picked (12, the KFONT header word at 0x14)
   // without confirming which offset the runtime font struct uses. This knob is
   // that uncertainty, made visible instead of buried in a magic constant.
-  float textScale = 1.0f;
+  float textScale = 1.3f;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--check") == 0)
       checkOnly = true;
@@ -1098,6 +1102,7 @@ int main(int argc, char **argv) {
 
   bool inMenu = false; // set once the terminal record has been reached
   int shotFrames = 0;
+  bool playingIntro = false;   // SCN01 is up, covering the menu
   // A name the XML does not have (say "frontend") leaves the boot sequence
   // running, so the language and aspect screens can be shot too.
   if (!shotPath.empty() && front.Menu().Open(shotScreen)) {
@@ -1236,9 +1241,32 @@ int main(int argc, char **argv) {
                      host.displayMode ? "widescreen" : "4:3");
       }
     } else {
+      const std::string prevScreen = front.Menu().ScreenId();
       const std::string cmd = front.Menu().Update(in);
       if (!cmd.empty())
         std::fprintf(stderr, "[play] command: %s\n", cmd.c_str());
+
+      // Accepting on the new-game options screen starts the game, and the
+      // first thing the game does is the intro. `newgame.xml` has no
+      // `onaccept` on the vibration row, so this transition is not in the
+      // screen data -- it is code, and this is the port's stand-in for it
+      // until that code is read.
+      //
+      // The clip is SCN01, and its variants on the disc are exactly what
+      // FUN_001F3048 resolves: SCN01W / SCN01N for the aspect, plus one
+      // language letter (SCN01WF, WG, WI, WS), English falling through to the
+      // bare name. Subtitles are not part of the file name.
+      if (in.accept && cmd.empty() && !playingIntro &&
+          (prevScreen == "newgame" ||
+           prevScreen == "new_game_menu_screen")) {
+        if (host.playMovie("SCN01", false)) {
+          playingIntro = true;
+          std::fprintf(stderr, "[play] intro: SCN01 (%s, %s, subtitles %s)\n",
+                       host.displayMode ? "widescreen" : "4:3",
+                       Game::LanguageOwnName((Game::Language)host.language),
+                       front.Menu().Toggle("subtitles") ? "on" : "off");
+        }
+      }
 
       if (in.up || in.down || in.left || in.right) {
         if (clickClip.Valid())
@@ -1252,6 +1280,16 @@ int main(int argc, char **argv) {
     }
 
 #ifdef CLIMAX_HAVE_FFMPEG
+    // The intro runs on the same player the boot movies use, and ends the same
+    // way they do -- when the clip runs out, not on a timer.
+    if (haveVideoSupport && playingIntro && bgVideo.IsOpen()) {
+      bgVideo.Update(dt);
+      if (bgVideo.Finished()) {
+        host.stopMovie();
+        playingIntro = false;
+        std::fprintf(stderr, "[play] intro finished\n");
+      }
+    }
     if (haveVideoSupport && inMenu) {
       const UI::Element *scr = front.Menu().Screen();
       std::string requestedMovie = scr ? scr->Attr("bgmovie") : "";
@@ -1748,6 +1786,17 @@ int main(int argc, char **argv) {
       }
     }
 
+#ifdef CLIMAX_HAVE_FFMPEG
+    if (playingIntro && bgVideo.IsOpen() && bgVideo.Width() > 0) {
+      const float texAR = (float)bgVideo.Width() / (float)bgVideo.Height();
+      const float winAR = (float)w / (float)h;
+      float dw, dh, dx, dy;
+      if (winAR >= texAR) { dh = (float)h; dw = dh * texAR; dy = 0.0f; dx = ((float)w - dw) * 0.5f; }
+      else                { dw = (float)w; dh = dw / texAR; dx = 0.0f; dy = ((float)h - dh) * 0.5f; }
+      painter.Quad(0, 0, (float)w, (float)h, 0, 0, 0, 0, 1.0f);
+      painter.Quad(dx, dy, dw, dh, bgVideo.Texture(), 1, 1, 1, 1);
+    }
+#endif
     if (inMenu && menuFadeTimer > 0.0f) {
       // Draw a black overlay fading out
       painter.Quad(0, 0, w, h, 0, 0, 0, 0, menuFadeTimer);
