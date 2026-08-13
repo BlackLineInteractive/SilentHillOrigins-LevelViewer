@@ -1377,26 +1377,69 @@ int ViewerApp::Run(int argc, char* argv[]) {
                 static GlbExportOptions opt;
                 static std::string exportMsg;
                 static bool exportOk = false;
+                static bool saveToDesktop = true;
+                static char customFilename[128] = "";
 
-                ImGui::Checkbox("Embed textures",  &opt.embedTextures);
-                ImGui::Checkbox("Vertex colors",   &opt.includeVertexColors);
-                ImGui::Checkbox("Lights",          &opt.includeLights);
+                ImGui::Checkbox("Embed textures (PNG)",     &opt.embedTextures);
+                ImGui::Checkbox("Accurate Alpha (PBR)",     &opt.accurateAlpha);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Accurately assigns OPAQUE, MASK (0.02), and BLEND modes\n"
+                                      "matching the on-screen viewer (character faces, blood, etc.)");
+                ImGui::Checkbox("Unlit Materials",          &opt.unlitMaterials);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Emit KHR_materials_unlit for additive fire/effects and unlit geometry");
+                ImGui::Checkbox("UV Animation tracks",      &opt.exportUvAnimations);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Export UV animation tracks via KHR_texture_transform\n"
+                                      "and KHR_animation_pointer for animatable scrolling UVs");
+                ImGui::Checkbox("Bake Active UV Frame",     &opt.bakeCurrentUvAnim);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Bake the active UV animation frame directly into vertex UVs\n"
+                                      "(100%% compatibility with any DCC / game engine)");
+                ImGui::Checkbox("Vertex colors",            &opt.includeVertexColors);
+                ImGui::Checkbox("Lights",                   &opt.includeLights);
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("Export CColorLight objects as\nKHR_lights_punctual lights");
-                ImGui::Checkbox("Bake instances",  &opt.bakeInstances);
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Write one copy of a model per placement.\n"
-                                      "Off: only the first placement is written.");
+                ImGui::Checkbox("Save to Desktop",          &saveToDesktop);
 
-                ImGui::TextDisabled("One mesh per texture name");
+                // Default filename derived from container
+                std::string defaultBase = g_CurrentMeshContainer.empty()
+                    ? std::string("scene")
+                    : fs::path(g_CurrentMeshContainer).filename().string();
+                if (defaultBase.size() > 4 && (sho_stricmp(defaultBase.c_str() + defaultBase.size() - 4, ".arc") == 0))
+                    defaultBase = defaultBase.substr(0, defaultBase.size() - 4);
+                for (char& c : defaultBase)
+                    if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|')
+                        c = '_';
+
+                if (customFilename[0] == '\0') {
+                    snprintf(customFilename, sizeof(customFilename), "%s", defaultBase.c_str());
+                }
+
+                ImGui::SetNextItemWidth(-1);
+                ImGui::InputTextWithHint("##outname", "Output filename (.glb)", customFilename, sizeof(customFilename));
+
                 if (ImGui::Button("Export .glb", ImVec2(-1, 0))) {
-                    std::string name = g_CurrentMeshContainer.empty()
-                        ? std::string("scene")
-                        : fs::path(g_CurrentMeshContainer).filename().string();
-                    const std::string out = name + ".glb";
+                    std::string fname = customFilename[0] ? customFilename : defaultBase;
+                    if (fname.size() < 4 || sho_stricmp(fname.c_str() + fname.size() - 4, ".glb") != 0)
+                        fname += ".glb";
+
+                    std::string outPath = fname;
+                    if (saveToDesktop) {
+#if defined(_WIN32)
+                        const char* home = std::getenv("USERPROFILE");
+                        std::string desk = home ? std::string(home) + "\\Desktop\\" : "";
+#else
+                        const char* home = std::getenv("HOME");
+                        std::string desk = home ? std::string(home) + "/Desktop/" : "";
+#endif
+                        if (!desk.empty()) outPath = desk + fname;
+                    }
+
+                    opt.uvAnimTime = state.uvAnimTime;
                     std::string err;
-                    exportOk = ExportGLB(out, opt, err);
-                    exportMsg = exportOk ? ("Saved " + out) : ("Failed: " + err);
+                    exportOk = ExportGLB(outPath, opt, err);
+                    exportMsg = exportOk ? ("Saved " + outPath) : ("Failed: " + err);
                     std::cerr << "[export] " << exportMsg << "\n";
                 }
                 if (!exportMsg.empty())

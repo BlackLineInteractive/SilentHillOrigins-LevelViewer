@@ -2,10 +2,15 @@
 #include <string>
 
 struct GlbExportOptions {
-    bool embedTextures  = true;   // write each texture into the .glb as a PNG
-    bool includeLights  = true;   // emit CColorLight objects via KHR_lights_punctual
+    bool embedTextures       = true;   // write each texture into the .glb as a PNG
+    bool includeLights       = true;   // emit CColorLight objects via KHR_lights_punctual
     bool includeVertexColors = true;
-    bool bakeInstances  = true;   // duplicate model geometry per placement
+    bool bakeInstances       = true;   // duplicate model geometry per placement
+    bool accurateAlpha       = true;   // match viewer alpha (OPAQUE / MASK 0.02 / BLEND / additive)
+    bool exportUvAnimations  = true;   // emit UV animation tracks & KHR_texture_transform
+    bool bakeCurrentUvAnim   = false;  // bake active UV animation directly into vertex UV coordinates
+    float uvAnimTime         = 0.0f;   // time used when baking UV animation
+    bool unlitMaterials      = true;   // emit KHR_materials_unlit for unlit geometry & additive effects
 };
 
 // Writes the loaded scene to a binary glTF 2.0 file.

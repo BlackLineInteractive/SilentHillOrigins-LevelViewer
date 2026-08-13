@@ -60,5 +60,6 @@ void InstallGLTextureSink() {
         g_TexGradient[lower] = raw.hasAlphaGradient;
         g_TexInfo[raw.name] = pi;
         g_TexInfo[upper] = pi;
+        g_TexInfo[lower] = pi;
     });
 }
