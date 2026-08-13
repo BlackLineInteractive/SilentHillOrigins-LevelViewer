@@ -195,6 +195,7 @@ endif()
 
 add_executable(ClimaxGameEngineToolkit MACOSX_BUNDLE
     src/main.cpp
+    src/Viewer/ViewerDraw.cpp
     src/UI/UI.cpp
     # Still GL-bound, so still here rather than in climax-core.
     src/Core/Common.cpp
