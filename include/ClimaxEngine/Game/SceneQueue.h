@@ -40,7 +40,7 @@ namespace Game {
 
 enum class SceneCmd {
     Begin        = 0x00,   // FUN_0017AA58
-    OpenArchive  = 0x01,   // FUN_0017B398 -- formats "%s.ARC" and reads it
+    LoadTextures = 0x01,   // FUN_0017B398 -- "%s.txd" and "%s-%s.txd"
     ReadHeader   = 0x02,   // FUN_0017B448
     Prepare      = 0x03,   // FUN_0017B488
     Step4        = 0x04,   // FUN_0017B510
@@ -83,9 +83,13 @@ public:
     virtual bool ReleaseResources() = 0;
     virtual bool FinishTeardown() = 0;
 
-    // 0x01 / 0x02 / 0x03: "<name>.ARC" off the disc, then its header, then the
-    // memory to unpack it into.
-    virtual bool OpenArchive(const std::string &scene) = 0;
+    // 0x01. Not the level: FUN_0017B398 formats "%s.txd" and, when it has a
+    // second name, "%s-%s.txd" -- the room's texture dictionary and the one
+    // shared with the room it is being entered from. Those are the
+    // `HO_1_ExamRoom.txd` / `HO_1_ExamRoom-HO_1_Lobby.txd` entries in SH.ARC.
+    // (An earlier comment here said it opened "%s.ARC". That was wrong.)
+    virtual bool LoadTextures(const std::string &scene,
+                              const std::string &from) = 0;
     virtual bool ReadHeader() = 0;
     virtual bool Prepare() = 0;
 
@@ -98,15 +102,29 @@ public:
     virtual bool StartLevelAudio() = 0;
     virtual bool HandOver() = 0;
 
-    // 0x00 / 0x04 / 0x0E / 0x0F -- reached by the dispatcher but not yet read.
-    // Defaulted so a port does not have to pretend it knows what they do.
-    virtual bool Unread(SceneCmd) { return true; }
+    // Every handler opens with the same gate: while the streamer is working
+    // (`FUN_001EF8F8`) it returns 0 and the queue stalls on that node. One
+    // check, checked once, rather than repeated in each step.
+    virtual bool StreamBusy() { return false; }
+
+    // 0x00 FUN_0017AA58: walks the world's resource slots against the node's
+    // and matches them by name. Returns 0 until they line up.
+    virtual bool MatchResources() { return true; }
+    // 0x04 FUN_0017B510: resolves the node's resource handle, if it has one.
+    virtual bool ResolveResource() { return true; }
+    // 0x0E FUN_0017B6C0: puts the subsystems back to a known state -- audio,
+    // the character manager, the renderer's lists, the loading indicator.
+    virtual bool ResetSubsystems() { return true; }
+    // 0x0F FUN_0017B7A0: plays a clip as part of the change. It starts the
+    // movie on the first visit and then returns 0 until the player reports it
+    // finished, which is how a cutscene sits inside a scene transition.
+    virtual bool PlaySceneMovie(const std::string &name) { (void)name; return true; }
 };
 
 class SceneQueue {
 public:
     // `FUN_00179FB8`: push the sequence that swaps one scene for another.
-    void LoadScene(const std::string &name);
+    void LoadScene(const std::string &name, const std::string &from = std::string());
 
     // `FUN_00179D60`: drain until a handler says "not yet". Call once a frame.
     void Update(SceneQueueHost &host, float dt);
@@ -122,6 +140,7 @@ public:
 private:
     std::deque<SceneNode> m_nodes;
     std::string m_scene;
+    std::string m_from;   // the room being left, for the shared .txd
 };
 
 } // namespace Game

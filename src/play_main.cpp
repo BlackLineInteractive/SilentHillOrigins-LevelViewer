@@ -31,6 +31,8 @@
 #include "ClimaxEngine/Core/UI/StringTable.h"
 #include "ClimaxEngine/Game/FrontEnd.h"
 #include "ClimaxEngine/Game/SceneQueue.h"
+#include "ClimaxEngine/Game/SceneObjects.h"
+#include "ClimaxEngine/Loader/Loader.h"
 #include "ClimaxEngine/Platform/PS2/AudioParser.h"
 #include "ClimaxEngine/Platform/PS2/PS2Texture.h"
 #include "ClimaxEngine/Platform/PS2/RwsAudio.h"
@@ -1138,7 +1140,8 @@ int main(int argc, char **argv) {
   struct PlaySceneHost : Game::SceneQueueHost {
       RWS::FileSystem::CArchive *arc = nullptr;
       float *fade = nullptr;          // the same black the intro uses
-      std::vector<uint8_t> raw;       // the scene container, as read
+      std::vector<uint8_t> raw;                    // the scene container
+      std::vector<NamedBlob> txds;   // its texture dictionaries
       std::string scene;
       float t = 0.0f;
 
@@ -1159,26 +1162,63 @@ int main(int argc, char **argv) {
       bool ClearWorld() override { raw.clear(); return true; }
       bool ReleaseResources() override { return true; }
       bool FinishTeardown() override { return true; }
-      bool OpenArchive(const std::string &name) override {
+      bool LoadTextures(const std::string &name, const std::string &from) override {
           scene = name;
-          // FUN_0017B398 formats "%s.ARC"; on this disc the scenes are entries
-          // of SH.ARC rather than files beside it, so the entry name is the
-          // scene name itself.
-          if (arc && ReadEntry(*arc, name.c_str(), raw)) {
+          // FUN_0017B398: the room's own dictionary, and -- when there is a
+          // room being left -- the one the two share. Both are plain entries
+          // of SH.ARC on this disc.
+          txds.clear();
+          auto take = [&](const std::string &entry) {
+              std::vector<uint8_t> b;
+              if (arc && ReadEntry(*arc, entry.c_str(), b)) {
+                  std::fprintf(stderr, "[scene] %s: %zu bytes\n", entry.c_str(), b.size());
+                  txds.emplace_back(entry, std::move(b));
+              }
+          };
+          if (!from.empty())
+              take(from + "-" + name + ".txd");
+          take(name + ".txd");
+          if (txds.empty())
+              std::fprintf(stderr, "[scene] %s: no texture dictionary\n", name.c_str());
+
+          // The scene's own objects are a separate entry under the bare name.
+          if (arc && ReadEntry(*arc, name.c_str(), raw))
               std::fprintf(stderr, "[scene] %s: %zu bytes\n", name.c_str(), raw.size());
-              return true;
-          }
-          std::fprintf(stderr, "[scene] %s: not in the archive\n", name.c_str());
-          return true;   // do not wedge the queue on a missing scene
+          else
+              std::fprintf(stderr, "[scene] %s: not in the archive\n", name.c_str());
+          return true;
       }
       bool ReadHeader() override { return true; }
       bool Prepare() override { return true; }
+      std::vector<Game::SceneObject> objects;
+      glm::vec3 spawn = glm::vec3(0.0f);
+      bool haveSpawn = false;
+
       bool Instantiate(const std::string &name) override {
-          // Where the world would be built. climax-play has no 3D pass yet, so
-          // this is the honest edge of the port: the bytes are in `raw` and
-          // nothing turns them into a scene.
-          std::fprintf(stderr, "[scene] instantiate %s -- not implemented\n",
-                       name.c_str());
+          // The same loader the toolkit uses. It is linked into the game now,
+          // so the level is decoded here rather than only in the editor.
+          if (!raw.empty())
+              ::LoadLevelData(name, raw, txds);
+          objects = Game::ParseSceneObjects(raw.data(), raw.size());
+          haveSpawn = false;
+          int cameras = 0, triggers = 0, lights = 0;
+          for (const auto &o : objects) {
+              if (o.className == "CPlayerSpawner" && o.placed && !haveSpawn) {
+                  spawn = o.position;
+                  haveSpawn = true;
+              }
+              if (o.className.find("Camera") != std::string::npos) ++cameras;
+              if (o.className.find("Trigger") != std::string::npos) ++triggers;
+              if (o.className.find("Light") != std::string::npos) ++lights;
+          }
+          std::fprintf(stderr,
+                       "[scene] %s: %zu objects -- %d cameras, %d triggers, %d lights\n",
+                       name.c_str(), objects.size(), cameras, triggers, lights);
+          if (haveSpawn)
+              std::fprintf(stderr, "[scene] player spawn (%.2f %.2f %.2f)\n",
+                           spawn.x, spawn.y, spawn.z);
+          else
+              std::fprintf(stderr, "[scene] no CPlayerSpawner placed\n");
           return true;
       }
       bool FreeTemporaries() override { return true; }
@@ -1188,9 +1228,8 @@ int main(int argc, char **argv) {
           std::fprintf(stderr, "[scene] %s up, control handed over\n", scene.c_str());
           return true;
       }
-      bool Unread(Game::SceneCmd c) override {
-          std::fprintf(stderr, "[scene] %s: unread command, skipped\n",
-                       Game::SceneCmdName(c));
+      bool ResetSubsystems() override {
+          std::fprintf(stderr, "[scene] subsystems reset\n");
           return true;
       }
   } sceneHost;

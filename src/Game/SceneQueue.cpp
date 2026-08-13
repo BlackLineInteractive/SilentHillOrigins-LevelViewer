@@ -6,7 +6,7 @@ namespace Game {
 const char *SceneCmdName(SceneCmd c) {
     switch (c) {
     case SceneCmd::Begin:          return "Begin";
-    case SceneCmd::OpenArchive:    return "OpenArchive";
+    case SceneCmd::LoadTextures:   return "LoadTextures";
     case SceneCmd::ReadHeader:     return "ReadHeader";
     case SceneCmd::Prepare:        return "Prepare";
     case SceneCmd::Step4:          return "Step4";
@@ -33,7 +33,10 @@ const char *SceneCmdName(SceneCmd c) {
 // control is handed over. Teardown before read is what keeps the peak memory
 // down on a console with 32 MB, and it is why a level change on the PS2 shows
 // black rather than the old room.
-void SceneQueue::LoadScene(const std::string &name) {
+void SceneQueue::LoadScene(const std::string &name, const std::string &from) {
+    m_from = m_scene;
+    if (!from.empty())
+        m_from = from;
     m_scene = name;
     m_nodes.clear();
     const SceneCmd order[] = {
@@ -41,7 +44,7 @@ void SceneQueue::LoadScene(const std::string &name) {
         SceneCmd::ClearWorld,
         SceneCmd::ReleaseRes,
         SceneCmd::FinishTeardown,
-        SceneCmd::OpenArchive,
+        SceneCmd::LoadTextures,
         SceneCmd::ReadHeader,
         SceneCmd::Prepare,
         SceneCmd::Instantiate,
@@ -65,6 +68,9 @@ void SceneQueue::Update(SceneQueueHost &host, float dt) {
     (void)dt;
     while (!m_nodes.empty()) {
         const SceneNode &n = m_nodes.front();
+        // The gate every handler in FUN_00179D60 opens with.
+        if (host.StreamBusy())
+            return;
         bool done = true;
         switch (n.cmd) {
         case SceneCmd::FadeOut:        done = host.FadeOut(fadeSeconds); break;
@@ -72,7 +78,7 @@ void SceneQueue::Update(SceneQueueHost &host, float dt) {
         case SceneCmd::ClearWorld:     done = host.ClearWorld(); break;
         case SceneCmd::ReleaseRes:     done = host.ReleaseResources(); break;
         case SceneCmd::FinishTeardown: done = host.FinishTeardown(); break;
-        case SceneCmd::OpenArchive:    done = host.OpenArchive(n.arg); break;
+        case SceneCmd::LoadTextures:   done = host.LoadTextures(n.arg, m_from); break;
         case SceneCmd::ReadHeader:     done = host.ReadHeader(); break;
         case SceneCmd::Prepare:        done = host.Prepare(); break;
         case SceneCmd::Instantiate:    done = host.Instantiate(n.arg); break;
@@ -80,10 +86,10 @@ void SceneQueue::Update(SceneQueueHost &host, float dt) {
         case SceneCmd::ResetSystems:   done = host.ResetSystems(); break;
         case SceneCmd::LevelAudio:     done = host.StartLevelAudio(); break;
         case SceneCmd::HandOver:       done = host.HandOver(); break;
-        case SceneCmd::Begin:
-        case SceneCmd::Step4:
-        case SceneCmd::StepE:
-        case SceneCmd::StepF:          done = host.Unread(n.cmd); break;
+        case SceneCmd::Begin:          done = host.MatchResources(); break;
+        case SceneCmd::Step4:          done = host.ResolveResource(); break;
+        case SceneCmd::StepE:          done = host.ResetSubsystems(); break;
+        case SceneCmd::StepF:          done = host.PlaySceneMovie(n.arg); break;
         }
         if (!done)
             return;   // the handler returned 0: stop here, retry next frame

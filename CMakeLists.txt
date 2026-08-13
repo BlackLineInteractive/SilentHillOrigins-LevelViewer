@@ -162,6 +162,7 @@ target_link_libraries(climax-core PUBLIC ZLIB::ZLIB glm::glm)
 add_library(climax-game STATIC
     src/Game/CameraLinks.cpp
     src/Game/SceneQueue.cpp
+    src/Game/SceneObjects.cpp
     src/Game/CharacterController.cpp
     src/Game/ZoneLinks.cpp
     src/Game/ButtonTriggers.cpp
@@ -274,7 +275,20 @@ if(BUILD_CLIMAX_PLAY)
     # Only its own main, plus the two libraries. The toolkit's renderer is not
     # here: it is bound to ViewerState and to ImGui, and dragging it in would
     # defeat the point of this target.
-    set(CLIMAX_PLAY_SOURCES src/play_main.cpp src/Platform/PS2/RwsAudio.cpp)
+    # The world loader. None of these pull in ImGui -- checked, not assumed --
+    # so the game can link the same code the toolkit uses instead of the level
+    # renderer living only inside the editor.
+    set(CLIMAX_PLAY_SOURCES
+        src/play_main.cpp
+        src/Platform/PS2/RwsAudio.cpp
+        src/Core/Common.cpp
+        src/Loader/Loader.cpp
+        src/Loader/GeometryDecoder.cpp
+        src/Loader/ResourceLoader.cpp
+        src/SG/SceneObject.cpp
+        src/Rendering/GPUMesh.cpp
+        src/Platform/Wii/WiiTexture.cpp
+        src/Rendering/GLTextureSink.cpp)
     if(SHO_HAVE_FFMPEG)
         list(APPEND CLIMAX_PLAY_SOURCES src/Rendering/VideoPlayer.cpp)
     endif()
