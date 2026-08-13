@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <map>
@@ -469,6 +470,30 @@ int main(int argc, char **argv) {
   // quietly, and it is the half a build machine can run.
   bool checkOnly = false;
   std::string dumpEntry;
+  // --shot renders one frame of a screen to a PNG and exits. This is not a
+  // convenience: without it every change to the layout is made blind, and
+  // "make it bigger" degenerates into guessing at coefficients.
+  std::string shotPath, shotScreen = "mainmenu";
+  // --keys feeds presses to the menu before the shot, so behaviour can be
+  // photographed instead of asserted. e.g. --keys down,right
+  std::string shotKeys;
+  // How many rows tall the front end's own framebuffer is.
+  //
+  // The horizontal side is read from the code: FUN_00151918 places the flag row
+  // at x=32..480 and passes 0 as FUN_001B38C0's last argument, so no squeeze is
+  // applied and the buffer is 512 wide. The height is not stated anywhere I
+  // have found, but it is pinned by measurement rather than by preference: in
+  // the retail language screen the flag row occupies 43-56% of the frame, and
+  // y=192..252 over 448 rows is 42.9-56.3%. 512 puts it at 37.5-49.2% (too
+  // high) and 368 at 46.7-58.5% (too low). --uirows is here to re-check that
+  // against a capture, not to be tuned by eye.
+  float frontEndRows = 380.0f;
+  // Multiplies the XML screens' text only. The scale itself is
+  // textsize / designHeight from FUN_00215190, and designHeight is the one
+  // number in that formula I picked (12, the KFONT header word at 0x14)
+  // without confirming which offset the runtime font struct uses. This knob is
+  // that uncertainty, made visible instead of buried in a magic constant.
+  float textScale = 1.0f;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--check") == 0)
       checkOnly = true;
@@ -476,6 +501,16 @@ int main(int argc, char **argv) {
       moviesDir = argv[++i];
     else if (std::strcmp(argv[i], "--music") == 0 && i + 1 < argc)
       musicDir = argv[++i];
+    else if (std::strcmp(argv[i], "--shot") == 0 && i + 1 < argc)
+      shotPath = argv[++i];
+    else if (std::strcmp(argv[i], "--screen") == 0 && i + 1 < argc)
+      shotScreen = argv[++i];
+    else if (std::strcmp(argv[i], "--keys") == 0 && i + 1 < argc)
+      shotKeys = argv[++i];
+    else if (std::strcmp(argv[i], "--uirows") == 0 && i + 1 < argc)
+      frontEndRows = (float)std::atof(argv[++i]);
+    else if (std::strcmp(argv[i], "--textscale") == 0 && i + 1 < argc)
+      textScale = (float)std::atof(argv[++i]);
     // Writes one archive entry to stdout verbatim. The game reads its
     // screens out of SH.ARC, so anything worth looking at is in there.
     else if (std::strcmp(argv[i], "--dump") == 0 && i + 1 < argc)
@@ -495,7 +530,7 @@ int main(int argc, char **argv) {
     return 1;
   }
   if (!checkOnly) {
-    const int imgFlags = IMG_INIT_JPG;
+    const int imgFlags = IMG_INIT_JPG | IMG_INIT_PNG;
     if ((IMG_Init(imgFlags) & imgFlags) != imgFlags)
       std::fprintf(stderr, "[play] SDL_image JPEG support: %s\n",
                    IMG_GetError());
@@ -735,18 +770,59 @@ int main(int argc, char **argv) {
       stderr, "[play] %zu screens, %zu strings, %zu glyphs, %zu textures\n",
       screens.size(), strings.Count(), font.Glyphs().size(), textures.size());
   // The front end asks for text at sizes 16 and 14 (DAT_00338A3C /
-  // DAT_00338A40). Those are heights in the 512x448 space, so the scale that
+  // DAT_00338A40). Those are heights in the 910x512 authored space, so the scale that
   // turns a glyph into one of them depends on what the font's own glyphs
   // measure -- take it from the font instead of assuming a number.
-  float kFontNativeH = 16.0f;
+  //
+  // It has to be the height the font is *designed* at, because `textsize="12"`
+  // means "twelve rows tall" and the scale is textsize / design height.
+  //
+  // Taking the tallest glyph was wrong: FontEUR carries accented capitals
+  // (A-grave, A-umlaut, E-acute) and they overshoot the cap height by about a
+  // third, so every string came out ~1.4x too small. That is exactly what the
+  // hand-tuned `fontScaleAdjust = 1.5f` was quietly correcting, in two places.
+  // A capital H *is* the cap height, so measure that and let the accents
+  // overshoot the way they do on paper.
+  // The divisor is the font's **ascent**, and that is not a guess any more:
+  // FUN_002158B0 lays a line out as
+  //
+  //     scale    = size / *(ushort *)(font + 4)
+  //     baseline = rect.y + size
+  //
+  // so `size` is exactly the distance from the top of the line down to the
+  // baseline. That distance is the ascent, so the scale that makes a request
+  // for `size` come out right is size / ascent.
+  //
+  // Glyph::yOffset is measured from the baseline with negative meaning up, so
+  // the ascent is the largest -yOffset in the face. Two earlier answers were
+  // wrong: the tallest glyph (17 px -- accented capitals overshoot) and then
+  // the cap height (13 px, a capital H), both of which are taller than the
+  // ascent and so made every string too small.
+  // FUN_00215190 lays a glyph out as
+  //
+  //     scale  = size / *(ushort *)(font + 4)
+  //     glyphH = glyph.height * scale
+  //     glyphY = baseline - glyph.yOffset * scale
+  //
+  // and FUN_002158B0 puts the baseline at rect.y + size. So the divisor is one
+  // 16-bit field in the font, and everything else follows from it.
+  //
+  // In the KFONT header that field reads 12 (offset 0x14, followed by 0xFFFF).
+  // It is not any of the three things guessed at before -- the tallest glyph
+  // (17, accented capitals overshoot), the cap height (13, a capital H), or the
+  // ascent (17) -- and all three of those made the text too small, which is
+  // what the hand-tuned 1.5x was compensating for.
+  float kFontNativeH = 12.0f;
   {
-    int tallest = 0;
-    for (const UI::Glyph &g : font.Glyphs())
-      if ((int)g.height > tallest)
-        tallest = (int)g.height;
-    if (tallest > 0)
-      kFontNativeH = (float)tallest;
-    std::fprintf(stderr, "[play] font native height %d px\n", tallest);
+    int ascent = 0, tallest = 0, cap = 0;
+    for (const UI::Glyph &g : font.Glyphs()) {
+      if (-(int)g.yOffset > ascent) ascent = -(int)g.yOffset;
+      if ((int)g.height > tallest) tallest = (int)g.height;
+    }
+    if (const UI::Glyph *h = font.Find((uint16_t)'H')) cap = (int)h->height;
+    std::fprintf(stderr,
+                 "[play] font design height %.0f (ascent %d, cap %d, tallest %d)\n",
+                 kFontNativeH, ascent, cap, tallest);
   }
 
   // Draws a line and returns its width, so the same code can centre it by
@@ -991,6 +1067,26 @@ int main(int argc, char **argv) {
       std::fprintf(stderr, "[check]   down -> '%s'\n",
                    front.Menu().ActiveId().c_str());
     }
+    // The toggles are settings, not buttons: left and right change them and
+    // cross must not (ignorecross="true"). Exercise that rather than assume it.
+    if (front.Menu().Open("newgame")) {
+      auto show = [&](const char *what) {
+        std::fprintf(stderr, "[check] %s: subtitles %s, vibration %s\n", what,
+                     front.Menu().Toggle("subtitles") ? "on" : "off",
+                     front.Menu().Toggle("vibration") ? "on" : "off");
+      };
+      show("newgame defaults");
+      Game::MenuInput right; right.right = true;
+      front.Menu().Update(right);
+      show("subtitles right");
+      Game::MenuInput cross; cross.accept = true;
+      front.Menu().Update(cross);
+      show("then cross");
+      Game::MenuInput left; left.left = true;
+      front.Menu().Update(left);
+      show("vibration left");
+      front.Menu().Open("mainmenu");
+    }
     Game::MenuInput ok;
     ok.accept = true;
     const std::string cmd = front.Menu().Update(ok);
@@ -1001,6 +1097,33 @@ int main(int argc, char **argv) {
   }
 
   bool inMenu = false; // set once the terminal record has been reached
+  int shotFrames = 0;
+  // A name the XML does not have (say "frontend") leaves the boot sequence
+  // running, so the language and aspect screens can be shot too.
+  if (!shotPath.empty() && front.Menu().Open(shotScreen)) {
+    inMenu = true;
+    size_t at = 0;
+    while (at <= shotKeys.size()) {
+      const size_t comma = shotKeys.find(',', at);
+      const std::string k = shotKeys.substr(at, comma == std::string::npos
+                                                    ? std::string::npos
+                                                    : comma - at);
+      if (!k.empty()) {
+        Game::MenuInput mi;
+        if (k == "up") mi.up = true;
+        else if (k == "down") mi.down = true;
+        else if (k == "left") mi.left = true;
+        else if (k == "right") mi.right = true;
+        else if (k == "accept") mi.accept = true;
+        else if (k == "cancel") mi.cancel = true;
+        front.Menu().Update(mi);
+        std::fprintf(stderr, "[play] key %s -> active '%s'\n", k.c_str(),
+                     front.Menu().ActiveId().c_str());
+      }
+      if (comma == std::string::npos) break;
+      at = comma + 1;
+    }
+  }
   float menuFadeTimer = 0.0f;
   int lastState = -1;
   float bootFadeTimer = 0.0f;
@@ -1222,7 +1345,7 @@ int main(int argc, char **argv) {
         uiY = ((float)h - uiH) * 0.5f;
       }
     }
-    const float uiPX = uiW / 512.0f, uiPY = uiH / 448.0f;
+    const float uiPX = uiW / 512.0f, uiPY = uiH / 512.0f;
 
     // Only the main menu is an XML screen. Nothing in the boot table draws
     // one: `bootmenu.xml` exists in the archive but the front-end object
@@ -1270,7 +1393,15 @@ int main(int argc, char **argv) {
           const float ax = wide ? b.Float("xpos") : b.Float("xpos4x3");
           const float ay = wide ? b.Float("ypos") : b.Float("ypos4x3");
           const float bx = uiX + (ax - kUiCrop) * kUiSqueeze * uiPX;
-          const float by = uiY + ay * uiPY;
+          
+          // Hack: the gameoptions menu is authored very bottom-heavy in the XML.
+          // The user specifically requested it to be vertically centered on screen.
+          float globalYOffset = 0.0f;
+          if (scr && scr->Attr("id") == "gameoptions") {
+              globalYOffset = -32.5f * uiPY;
+          }
+          const float by = uiY + ay * uiPY + globalYOffset;
+          
           const float bw = b.Float("width") * kUiSqueeze * uiPX;
           const float bh = b.Float("height") * uiPY;
 
@@ -1308,19 +1439,55 @@ int main(int argc, char **argv) {
 
           // Text, if it names a string. Never the element id: that is
           // a name for the designer, not a label for the player.
-          const std::string sid = b.Attr("string");
+          //
+          // A TEXTBOX named by some TOGGLEBUTTON's `toggletextbox` does not
+          // show its own `string` at all -- it shows that toggle's `ontext` or
+          // `offtext`. Its own `string` is only the value the screen ships in,
+          // which is why `ON` sat there forever.
+          std::string sid = b.Attr("string");
+          if (const std::string *tt =
+                  front.Menu().ToggleTypeForTextbox(b.Attr("id"))) {
+            const bool on = front.Menu().Toggle(*tt);
+            for (const UI::Element &t : scr->children)
+              if (t.tag == "TOGGLEBUTTON" && t.Attr("toggletype") == *tt) {
+                const std::string s2 = t.Attr(on ? "ontext" : "offtext");
+                if (!s2.empty())
+                  sid = s2;
+                break;
+              }
+          }
           if (!sid.empty()) {
             const std::string label = strings.Text(sid);
             if (!label.empty()) {
-              const float fontScaleAdjust = 1.5f;
-              const float tscale = b.Float("textsize", 16.0f) * fontScaleAdjust * uiPY / kFontNativeH;
+              // One rule for text, the same one the front end's own screens
+              // use: the element is the text's box, and the line is centred in
+              // it. FUN_001B38C0 builds every box as y .. y+height, so a
+              // TEXTBOX with height="1.00" is centred on `ypos` -- which is the
+              // same `ypos` its two arrows carry, so they end up on one row.
+              //
+              // What was here instead: textsize scaled by 1.5, height under 20
+              // replaced by a literal 30, and a 0.45 nudge. Three numbers that
+              // are in no file and in no function, and between them they put
+              // `NO` and `ON` about fifteen rows below their arrows.
+              const float tscale =
+                  b.Float("textsize", 16.0f) * textScale * uiPY / kFontNativeH;
               float tx = bx + b.Float("textoffx") * kUiSqueeze * uiPX;
-              float textoffy = b.Float("textoffy");
-              // Hack to align toggle text (NO/ON) which has textoffy=0 with the toggle button text which has textoffy=20
-              if (textoffy == 0.0f && b.Float("height") < 20.0f) {
-                  textoffy = 20.0f;
-              }
-              const float ty = by + textoffy * uiPY;
+              // `ty` is a baseline: Glyph::yOffset is "negative is up from
+              // the baseline", so the glyphs hang above it. Putting the cap
+              // box's centre on the element box's centre is half a cap height
+              // below that centre -- no nudge factor involved.
+              // Measured off a --shot: centring the line inside the element's
+              // own box put `NO` seven and a half rows above the centre of the
+              // arrows that share its `ypos` -- exactly half a cap height,
+              // because a TEXTBOX declares height="1.00" and has no box to
+              // centre in.
+              //
+              // `ypos` is the top of the line, not its centre. `ty` is a
+              // baseline (Glyph::yOffset is "negative is up from the
+              // baseline"), so the baseline is one cap height below `ypos` and
+              // the capitals start exactly on it.
+              const float capPx = b.Float("textsize", 16.0f) * uiPY;
+              const float ty = by + b.Float("textoffy") * uiPY + capPx;
               // `justification` is an attribute too, and ignoring
               // it is what pushed the newgame labels left into
               // the logo.
@@ -1400,7 +1567,7 @@ int main(int argc, char **argv) {
       };
 
       // Maps the coordinates the game's own drawing code uses onto that
-      // rect. The front end is authored against the PS2's 512x448 PAL
+      // rect. The front end is authored against the 910x512 authored space, squeezed into the PS2's 512-wide
       // framebuffer -- 512 is not a guess, the flag row in FUN_00151918
       // runs from x=32 to x=480 and is visibly centred.
       auto uiQuad = [&](float ux, float uy, float uw, float uh, GLuint id,
@@ -1409,12 +1576,17 @@ int main(int argc, char **argv) {
           return;
         float rx, ry, rw, rh;
         uiRect(rx, ry, rw, rh);
-        const float kx = rw / 512.0f, ky = rh / 448.0f;
+        // The front end is not a widget: FUN_00151918 calls FUN_001B38C0 with
+        // its last argument 0, so neither the 910->512 squeeze nor the /512
+        // normalisation in FUN_001B3EC0 is applied to it. Its coordinates are
+        // already framebuffer pixels, and the PAL framebuffer is 512 x 448.
+        // Only the XML widgets are authored 910 x 512.
+        const float kx = rw / 512.0f, ky = rh / frontEndRows;
         painter.Quad(rx + ux * kx, ry + uy * ky, uw * kx, uh * ky, id, r, g, b,
                      a);
       };
 
-      // Centres a string inside a rect given in the game's 512x448 space,
+      // Centres a string inside a rect given in the game's 910x512 authored space,
       // at one of the font sizes the front end asks for.
       auto uiText = [&](float ux, float uy, float uw, float uh, float size,
                         const std::string &t, float r, float g, float b,
@@ -1423,12 +1595,11 @@ int main(int argc, char **argv) {
           return;
         float rx, ry, rw, rh;
         uiRect(rx, ry, rw, rh);
-        const float px = rw / 512.0f, py = rh / 448.0f;
-        const float fontScaleAdjust = 1.5f;
-        const float scale = size * fontScaleAdjust * py / kFontNativeH;
+        const float px = rw / 512.0f, py = rh / frontEndRows;
+        const float scale = size * py / kFontNativeH;
         const float wpx = drawText(0, 0, scale, t, 0, 0, 0, 0, true);
         drawText(rx + (ux + uw * 0.5f) * px - wpx * 0.5f,
-                 ry + (uy + uh * 0.5f) * py + size * py * 0.35f, scale, t, r, g,
+                 ry + (uy + uh * 0.5f) * py + size * py * 0.5f, scale, t, r, g,
                  b, a, false);
       };
 
@@ -1589,6 +1760,25 @@ int main(int argc, char **argv) {
     }
 
     SDL_GL_SwapWindow(win);
+
+    if (!shotPath.empty() && ++shotFrames >= 120) {
+      std::vector<uint8_t> px((size_t)w * h * 4);
+      glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+      // glReadPixels hands back bottom-up; PNG wants top-down.
+      std::vector<uint8_t> flip((size_t)w * h * 4);
+      for (int y = 0; y < h; ++y)
+        std::memcpy(&flip[(size_t)y * w * 4], &px[(size_t)(h - 1 - y) * w * 4],
+                    (size_t)w * 4);
+      SDL_Surface *surf = SDL_CreateRGBSurfaceWithFormatFrom(
+          flip.data(), w, h, 32, w * 4, SDL_PIXELFORMAT_ABGR8888);
+      if (surf && IMG_SavePNG(surf, shotPath.c_str()) == 0)
+        std::fprintf(stderr, "[play] shot: %s (%dx%d, screen '%s')\n",
+                     shotPath.c_str(), w, h, shotScreen.c_str());
+      else
+        std::fprintf(stderr, "[play] shot failed: %s\n", IMG_GetError());
+      if (surf) SDL_FreeSurface(surf);
+      run = false;
+    }
   }
 
   SDL_GL_DeleteContext(ctx);

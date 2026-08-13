@@ -25,6 +25,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -247,6 +248,27 @@ public:
     // starting a game -- or an empty string.
     std::string Update(const MenuInput &in);
 
+    // ── TOGGLEBUTTON ────────────────────────────────────────────────────────
+    //
+    // A TOGGLEBUTTON is a setting, not a button, and everything about it is in
+    // its own attributes:
+    //
+    //   toggletype="subtitles"                  which setting it drives
+    //   toggletextbox="newgame_sub_toggle_text" the TEXTBOX showing the value
+    //   ontext="ui_subtitles_on"                string id when on
+    //   offtext="ui_subtitles_off"              string id when off
+    //   ignorecross="true"                      cross does not flip it
+    //
+    // `toggletype` is matched in FUN_001C4878 against a table of nine at
+    // 0x00339D48: overbright, subtitles, vibration, mapzoom, alwaysrun,
+    // extrablood, noisefilter, bloodyfootsteps, specialsave. Those are the
+    // game's settings, and this is the widget that edits them.
+    bool Toggle(const std::string &type) const;
+    void SetToggle(const std::string &type, bool on);
+    // The TEXTBOX an element names, or empty. Lets the renderer find which
+    // toggle owns a given textbox without knowing the widget rules.
+    const std::string *ToggleTypeForTextbox(const std::string &textboxId) const;
+
 private:
     const UI::Element *FindScreen(const std::string &id) const;
     void SelectDefault();
@@ -256,6 +278,7 @@ private:
     const UI::Element *m_screen = nullptr;
     std::string m_activeId;
     std::vector<std::string> m_back;   // screen stack, for cancel
+    std::map<std::string, bool> m_toggles;
 };
 
 // ── the front end ────────────────────────────────────────────────────────────

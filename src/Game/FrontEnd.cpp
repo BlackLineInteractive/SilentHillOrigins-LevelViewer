@@ -152,6 +152,29 @@ const UI::Element *MenuState::Active() const {
     return nullptr;
 }
 
+bool MenuState::Toggle(const std::string &type) const {
+    auto it = m_toggles.find(type);
+    // The defaults are the strings the screen ships with: newgame.xml opens
+    // with `ui_newgame_no` on subtitles and `ui_options_on` on vibration.
+    if (it != m_toggles.end())
+        return it->second;
+    return type == "vibration";
+}
+
+void MenuState::SetToggle(const std::string &type, bool on) { m_toggles[type] = on; }
+
+const std::string *MenuState::ToggleTypeForTextbox(const std::string &textboxId) const {
+    if (!m_screen || textboxId.empty())
+        return nullptr;
+    for (const UI::Element &c : m_screen->children)
+        if (c.tag == "TOGGLEBUTTON" && c.Attr("toggletextbox") == textboxId) {
+            const std::string *t = c.Get("toggletype");
+            if (t && !t->empty())
+                return t;
+        }
+    return nullptr;
+}
+
 std::string MenuState::Update(const MenuInput &in) {
     const UI::Element *cur = Active();
     if (!cur)
@@ -170,6 +193,18 @@ std::string MenuState::Update(const MenuInput &in) {
                 return;
             }
     };
+
+    // A TOGGLEBUTTON takes left and right for itself: they change the setting
+    // rather than moving the cursor, and `ignorecross="true"` says cross must
+    // not flip it -- accept is a move, which is why `onaccept` on the subtitles
+    // row names the vibration row.
+    if (cur->tag == "TOGGLEBUTTON") {
+        const std::string type = cur->Attr("toggletype");
+        if (!type.empty() && (in.left || in.right)) {
+            SetToggle(type, in.right ? true : false);
+            return {};
+        }
+    }
 
     if (in.up) move("onup");
     else if (in.down) move("ondown");
