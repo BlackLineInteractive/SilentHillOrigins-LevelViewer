@@ -18,6 +18,7 @@
 #include "ClimaxEngine/Game/CameraLinks.h"
 #include "ClimaxEngine/Game/CharacterController.h"
 #include "ClimaxEngine/Game/ZoneLinks.h"
+#include "ClimaxEngine/Game/ButtonTriggers.h"
 #include "ClimaxEngine/Render/PlayerModel.h"
 
 void InstallGLTextureSink();
@@ -928,9 +929,11 @@ void main(){
                 static std::string placedFor;
                 static std::string arrivedFrom;   // zone the player came out of
                 static std::vector<ClimaxEngine::Game::ZoneLink> zoneLinks;
+                static std::vector<ClimaxEngine::Game::ButtonTrigger> buttonTriggers;
 
                 if (placedFor != g_CurrentMeshContainer) {
                     zoneLinks = ClimaxEngine::Game::BuildZoneLinks(g_GameObjects);
+                    buttonTriggers = ClimaxEngine::Game::BuildButtonTriggers(g_GameObjects);
                     std::cerr << "[zone] " << zoneLinks.size()
                               << " doorway(s) in " << g_CurrentMeshContainer << "\n";
                     for (const auto &z : zoneLinks)
@@ -993,6 +996,27 @@ void main(){
                     if (want < 0) want = g_Player.idleClip;
                     if (want >= 0 && want != g_Player.currentClip)
                         s_playerClipName = g_Player.PlayClipAt(want);
+                        
+                    // ── Footsteps ───────────────────────────────────────────
+                    if (moving) {
+                        static float s_footstepTimer = 0.0f;
+                        s_footstepTimer += dt;
+                        const float stepInterval = running ? 0.35f : 0.5f;
+                        if (s_footstepTimer >= stepInterval) {
+                            s_footstepTimer = 0.0f;
+                            // Play a footstep sound if available
+                            if (!g_Sounds.empty()) {
+                                // Find a sound that might be a footstep
+                                for (const auto& snd : g_Sounds) {
+                                    if (snd.name.find("Foot") != std::string::npos || 
+                                        snd.name.find("Step") != std::string::npos) {
+                                        PlayAudioClip(snd);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // Camera planes: crossing one hands the view to the camera
@@ -1028,6 +1052,16 @@ void main(){
                             std::cout << "[zone] " << link.fromZone << " -> "
                                       << link.toZone << "  (" << link.eventName
                                       << ")\n";
+                            // ── Door Sound ────────────────────────────────
+                            if (!g_Sounds.empty()) {
+                                for (const auto& snd : g_Sounds) {
+                                    if (snd.name.find("Door") != std::string::npos || 
+                                        snd.name.find("Open") != std::string::npos) {
+                                        PlayAudioClip(snd);
+                                        break;
+                                    }
+                                }
+                            }
                             LoadLevelFromArc(idx);
                         } else {
                             std::cerr << "[zone] no container named "
@@ -1037,7 +1071,7 @@ void main(){
                 } else {
                     s_zonePrompt.clear();
                 }
-                s_useDoorPressed = false;
+                
                 if (state.autoCameras) {
                     const int cut = switcher.Update(body.position);
                     if (cut >= 0 && cut < (int)g_Cameras.size())
@@ -1094,6 +1128,34 @@ void main(){
                         }
                         if (best >= 0) state.activeCamera = best;
                         else if (anySight >= 0) state.activeCamera = anySight;
+                    }
+                }
+
+                // ── Button Triggers ─────────────────────────────────────────
+                static int s_buttonTriggerHere = -1;
+                s_buttonTriggerHere = ClimaxEngine::Game::ButtonTriggerAt(
+                    buttonTriggers, body.position, 0.9f);
+                if (s_buttonTriggerHere >= 0) {
+                    // Similar to doors, we could display a prompt or just trigger
+                    // an event on action key press. We'll use the objName as prompt.
+                    s_zonePrompt = buttonTriggers[(size_t)s_buttonTriggerHere].objName;
+                    if (s_useDoorPressed) {
+                        // For a teleport, load the target map
+                        const auto& btn = buttonTriggers[(size_t)s_buttonTriggerHere];
+                        if (!btn.targetMap.empty()) {
+                            auto *arc = ClimaxEngine::RWS::FileSystem::
+                                CArchiveManager::GetInstance().GetFirstArchive();
+                            const int idx = arc ? arc->Find(btn.targetMap) : -1;
+                            if (idx >= 0) {
+                                arrivedFrom = btn.eventName; 
+                                std::cout << "[trigger] Teleporting to " << btn.targetMap << "\n";
+                                LoadLevelFromArc(idx);
+                            } else {
+                                std::cerr << "[trigger] map " << btn.targetMap << " not found in ARC\n";
+                            }
+                        } else {
+                            std::cerr << "[trigger] Interact with " << btn.objName << " (event: " << btn.eventName << ")\n";
+                        }
                     }
                 }
 

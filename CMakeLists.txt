@@ -163,6 +163,7 @@ add_library(climax-game STATIC
     src/Game/CameraLinks.cpp
     src/Game/CharacterController.cpp
     src/Game/ZoneLinks.cpp
+    src/Game/ButtonTriggers.cpp
     src/Game/FrontEnd.cpp
 )
 target_link_libraries(climax-game PUBLIC climax-core)

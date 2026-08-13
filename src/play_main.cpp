@@ -11,8 +11,8 @@
 // the menu; it is the menu, at the coordinates the game ships.
 // ─────────────────────────────────────────────────────────────────────────────
 #include <GL/glew.h>
-#include <SDL.h>
-#include <SDL_image.h>
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_image.h>
 
 #include <algorithm>
 #include <cmath>
@@ -989,6 +989,14 @@ int main(int argc, char **argv) {
       std::fprintf(stderr, "[play] strings: %s not in the archive\n", entry);
     }
   };
+  // Every movie's audio is a separate track under SHO-port/MUSIC, named after
+  // the clip's base -- MENU -> MUSIC/M/MENU.WAV, SCN01 -> MUSIC/S/SCN01.WAV --
+  // because on the disc it is a separate MUSIC/*.RWS, not a stream inside the
+  // .PSS. LOGO is the one clip whose track is not named after it: LUMBRYRD.
+  auto movieTrack = [&](const std::string &base) -> std::string {
+    const std::string stem = (base == "LOGO") ? std::string("LUMBRYRD") : base;
+    return musicDir + "/" + stem.substr(0, 1) + "/" + stem + ".WAV";
+  };
   host.playMovie = [&](const char *name, bool loop) -> bool {
 #ifdef CLIMAX_HAVE_FFMPEG
     // --check has no GL context, and the decoder uploads to a texture.
@@ -1004,11 +1012,22 @@ int main(int argc, char **argv) {
       if (!p.empty() && bgVideo.Open(p)) {
         bgLooping = loop;
         bgName = upper;
-        // The logo record's audio is not in the clip -- it is
-        // LUMBRYRD, started with the picture and ending with it.
-        if (upper == "LOGO" && logoClip.Valid())
-          ClimaxEngine::Audio::CAudioRelay::GetInstance().PlayAudioClip(
-              logoClip);
+        // Start the clip's own track with the picture. A looping background
+        // goes to the music voice so it loops by itself; a one-shot goes to
+        // the sfx voice and ends with the clip.
+        AudioClip track;
+        const std::string tp = movieTrack(upper);
+        if (::Audio::LoadFile(tp, track) && track.Valid()) {
+          auto &relay = ClimaxEngine::Audio::CAudioRelay::GetInstance();
+          if (loop)
+            relay.PlayMusic(track, 0.65f);
+          else
+            relay.PlayAudioClip(track);
+          std::fprintf(stderr, "[play] track %s (%.1f s)\n", tp.c_str(),
+                       track.Seconds());
+        } else {
+          std::fprintf(stderr, "[play] track %s: not found\n", tp.c_str());
+        }
         std::fprintf(stderr, "[play] movie '%s' -> %s (%dx%d)%s\n", name,
                      p.c_str(), bgVideo.Width(), bgVideo.Height(),
                      loop ? " looping" : "");
@@ -1103,6 +1122,16 @@ int main(int argc, char **argv) {
   bool inMenu = false; // set once the terminal record has been reached
   int shotFrames = 0;
   bool playingIntro = false;   // SCN01 is up, covering the menu
+  // The menu does not cut to the intro, it goes through black: half a second
+  // down with the music, then the clip starts and half a second back up.
+  float introFade = 0.0f;      // 1 = fully black
+  bool introFadingOut = false; // going down; false while coming back up
+  bool introPending = false;   // accepted, waiting for black
+  // Screen-to-screen inside the menu goes through black too, the same way the
+  // menu-to-intro handover does -- just faster, because it is a step sideways
+  // rather than a handover to another part of the game.
+  std::string lastScreenId;
+  float screenFade = 0.0f;
   // A name the XML does not have (say "frontend") leaves the boot sequence
   // running, so the language and aspect screens can be shot too.
   if (!shotPath.empty() && front.Menu().Open(shotScreen)) {
@@ -1243,6 +1272,10 @@ int main(int argc, char **argv) {
     } else {
       const std::string prevScreen = front.Menu().ScreenId();
       const std::string cmd = front.Menu().Update(in);
+      if (front.Menu().ScreenId() != lastScreenId) {
+        lastScreenId = front.Menu().ScreenId();
+        screenFade = 1.0f;   // the new screen comes up out of black
+      }
       if (!cmd.empty())
         std::fprintf(stderr, "[play] command: %s\n", cmd.c_str());
 
@@ -1259,13 +1292,9 @@ int main(int argc, char **argv) {
       if (in.accept && cmd.empty() && !playingIntro &&
           (prevScreen == "newgame" ||
            prevScreen == "new_game_menu_screen")) {
-        if (host.playMovie("SCN01", false)) {
-          playingIntro = true;
-          std::fprintf(stderr, "[play] intro: SCN01 (%s, %s, subtitles %s)\n",
-                       host.displayMode ? "widescreen" : "4:3",
-                       Game::LanguageOwnName((Game::Language)host.language),
-                       front.Menu().Toggle("subtitles") ? "on" : "off");
-        }
+        introPending = true;
+        introFadingOut = true;
+        introFade = 0.0f;
       }
 
       if (in.up || in.down || in.left || in.right) {
@@ -1277,6 +1306,29 @@ int main(int argc, char **argv) {
           ClimaxEngine::Audio::CAudioRelay::GetInstance().PlayAudioClip(
               selectClip);
       }
+    }
+
+    // The fade, and the handover in the middle of it.
+    if (introFadingOut) {
+      introFade += dt * 2.0f;                 // half a second to black
+      if (introFade >= 1.0f) {
+        introFade = 1.0f;
+        introFadingOut = false;
+        if (introPending) {
+          introPending = false;
+          if (host.playMovie("SCN01", false)) {
+            playingIntro = true;
+            std::fprintf(stderr, "[play] intro: SCN01 (%s, %s, subtitles %s)\n",
+                         host.displayMode ? "widescreen" : "4:3",
+                         Game::LanguageOwnName((Game::Language)host.language),
+                         front.Menu().Toggle("subtitles") ? "on" : "off");
+          }
+        }
+      }
+    } else if (introFade > 0.0f) {
+      introFade -= dt * 2.0f;                 // and half a second back up
+      if (introFade < 0.0f)
+        introFade = 0.0f;
     }
 
 #ifdef CLIMAX_HAVE_FFMPEG
@@ -1797,6 +1849,15 @@ int main(int argc, char **argv) {
       painter.Quad(dx, dy, dw, dh, bgVideo.Texture(), 1, 1, 1, 1);
     }
 #endif
+    if (screenFade > 0.0f) {
+      screenFade -= dt * 3.0f;   // a third of a second
+      if (screenFade < 0.0f)
+        screenFade = 0.0f;
+      if (!playingIntro)
+        painter.Quad(0, 0, (float)w, (float)h, 0, 0, 0, 0, screenFade);
+    }
+    if (introFade > 0.0f)
+      painter.Quad(0, 0, (float)w, (float)h, 0, 0, 0, 0, introFade);
     if (inMenu && menuFadeTimer > 0.0f) {
       // Draw a black overlay fading out
       painter.Quad(0, 0, w, h, 0, 0, 0, 0, menuFadeTimer);
