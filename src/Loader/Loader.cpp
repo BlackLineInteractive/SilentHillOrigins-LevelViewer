@@ -730,7 +730,45 @@ static void ParseGameObject(const std::vector<uint8_t> &data, size_t off,
     go.atOrigin = (glm::length(go.position) < 1e-4f);
   }
 
+
   // Second pass for CColorLight: the payload is spread over two components.
+  if (go.className == "CFogConfig") {
+    go.isFogConfig = true;
+    int group = 0;
+    long lastIdx = -1;
+    size_t q = body + 4;
+    while (q + 8 <= bodyEnd) {
+      const uint32_t rs = ru32l(q);
+      const uint32_t rid = ru32l(q + 4);
+      if (rid == 0x0711) {
+        size_t rq = q + 8;
+        const size_t rqEnd = rq + rs;
+        while (rq + 12 <= rqEnd) {
+          const uint32_t propType = ru32l(rq);
+          const uint32_t propSize = ru32l(rq + 4);
+          const uint32_t propId = ru32l(rq + 8);
+          if (propId <= lastIdx) group++;
+          lastIdx = propId;
+          const size_t payload = rq + 12;
+          
+          if (propType == 2 && propSize == 4) { // Float
+              uint32_t bits = ru32l(payload);
+              float val;
+              std::memcpy(&val, &bits, 4);
+              if (propId == 2) go.fogStart = val;
+              if (propId == 3) go.fogEnd = val;
+              if (propId == 5) go.fogDensity = val;
+              if (propId == 10) go.fogColor.r = val;
+              if (propId == 11) go.fogColor.g = val;
+              if (propId == 8) go.fogColor.b = val;
+          }
+          rq += 12 + propSize;
+        }
+      }
+      q += 8 + rs;
+    }
+  }
+
   if (go.className == "CColorLight") {
     go.isLight = true;
     // Property indices restart at 0 for each component of the object, so a

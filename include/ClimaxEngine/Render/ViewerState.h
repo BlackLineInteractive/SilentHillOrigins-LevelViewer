@@ -147,6 +147,15 @@ struct ViewerState {
   // ice surfaces. Off by default -- both are approximations of engine state.
   bool frozenVariant = false;
   bool iceShading = true;
+
+  // Fog settings
+  bool  enableFog = false;
+  bool  useNativeFog = true;
+  float fogColor[3] = {0.5f, 0.5f, 0.5f};
+  float fogStart = 10.0f;
+  float fogEnd = 50.0f;
+  float fogDensity = 0.05f;
+  int   fogMode = 0; // 0=Linear, 1=Exp, 2=Exp2
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

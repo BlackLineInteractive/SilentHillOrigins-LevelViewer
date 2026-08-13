@@ -252,6 +252,13 @@ struct GameObject {
   float lightAngle = 45.0f; // >180 means omnidirectional
   int lightType = 0;
 
+  // CFogConfig payload
+  bool isFogConfig = false;
+  float fogStart = 13.0f;
+  float fogEnd = 25.0f;
+  float fogDensity = 0.3f;
+  glm::vec3 fogColor = glm::vec3(0.65f, 1.0f, 0.7f);
+
   // Field of view in degrees, from CBaseCamera property 2 -- the property the
   // engine feeds to Camera::CBaseCamera::SetFOV. Shared by every camera class,
   // so constraint and cutscene cameras carry it too. -1 means not present.

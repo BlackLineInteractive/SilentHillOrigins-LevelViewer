@@ -195,6 +195,8 @@ endif()
 
 add_executable(ClimaxGameEngineToolkit MACOSX_BUNDLE
     src/main.cpp
+    src/Viewer/ViewerApp.cpp
+    src/Viewer/ViewerGraphics.cpp
     src/Viewer/ViewerDraw.cpp
     src/Viewer/ViewerAudio.cpp
     src/UI/UI.cpp
