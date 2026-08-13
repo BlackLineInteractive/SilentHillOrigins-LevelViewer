@@ -172,6 +172,6 @@ extern std::vector<ClumpObject>                       g_Clumps;
 extern std::vector<GameObject>                        g_GameObjects;
 extern std::vector<LevelCamera>                       g_Cameras;
 extern std::vector<AudioClip>                         g_Sounds;
-extern std::vector<AudioSourceRef>                    g_AudioLibrary;
+
 extern std::string                                    g_CurrentMeshContainer;
 extern std::vector<std::string>                       g_CurrentTxdPaths;

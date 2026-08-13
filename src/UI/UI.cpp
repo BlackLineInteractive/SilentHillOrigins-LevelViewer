@@ -4,6 +4,7 @@
 #include "ClimaxEngine/Core/RWS/FileSystem/CArchiveManager.h"
 #include "ClimaxEngine/Loader/Loader.h"
 #include "ClimaxEngine/SG/SceneObject.h"
+#include "ClimaxEngine/Viewer/ViewerAudio.h"
 #include "imgui.h"
 #include <algorithm>
 #include "im_anim.h"
@@ -17,6 +18,8 @@
 // Defined in main.cpp — persists the last-opened arc path to disk.
 extern void SaveArcPref(const std::string &arcPath);
 extern std::string LoadArcPref();
+
+using namespace ClimaxEngine::Viewer;
 
 static char arcFilter[128] = "";
 
