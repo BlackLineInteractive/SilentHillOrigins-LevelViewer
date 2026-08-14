@@ -112,64 +112,34 @@ void CharacterController::Step(const CollisionMesh &world, const glm::vec3 &move
         return;
     }
 
-    // 1. Horizontal movement with wall depenetration (ignore flat floor/road triangles)
-    glm::vec3 wishPos = position + glm::vec3(move.x, 0.0f, move.z);
-    
-    for (int pass = 0; pass < 3; ++pass) {
-        bool pushed = false;
-        glm::vec3 waistPos(wishPos.x, wishPos.y + 0.4f, wishPos.z);
-        for (size_t i = 0; i + 2 < world.indices.size(); i += 3) {
-            const glm::vec3 &a = world.verts[world.indices[i]];
-            const glm::vec3 &b = world.verts[world.indices[i + 1]];
-            const glm::vec3 &c = world.verts[world.indices[i + 2]];
-
-            glm::vec3 n = glm::cross(b - a, c - a);
-            float len = glm::length(n);
-            if (len < 1e-6f) continue;
-            n /= len;
-
-            // Only collide with walls/steep barriers, ignore floor polygons (n.y > 0.6)
-            if (std::abs(n.y) > 0.65f) continue;
-
-            glm::vec3 closest = ClosestPointOnTriangle(waistPos, a, b, c);
-            glm::vec3 away = waistPos - closest;
-            away.y = 0.0f; // horizontal push only
-            float dist = glm::length(away);
-            if (dist < radius && dist > 1e-5f) {
-                away /= dist;
-                wishPos += away * (radius - dist);
-                pushed = true;
-            }
-        }
-        if (!pushed) break;
-    }
-    position.x = wishPos.x;
-    position.z = wishPos.z;
-
-    // 2. Vertical movement & downward floor raycast
     velocity.y += gravity * dt;
     velocity.y = std::max(velocity.y, -40.0f);
+
+    // Horizontal movement and wall depenetration
+    position += glm::vec3(move.x, 0.0f, move.z);
+
+    glm::vec3 floorNormal(0.0f);
+    bool hitFloor = false;
+    Depenetrate(world, position, radius, floorNormal, hitFloor, maxSlope);
+
+    // Vertical movement and floor depenetration
     position.y += velocity.y * dt;
 
-    // Smooth step-up and floor snapping
-    glm::vec3 probeStart(position.x, position.y + 0.55f, position.z);
-    glm::vec3 groundNorm(0.0f, 1.0f, 0.0f);
-    float distToGround = RayDown(world, probeStart, 1.35f, &groundNorm);
+    floorNormal = glm::vec3(0.0f);
+    hitFloor = false;
+    Depenetrate(world, position, radius, floorNormal, hitFloor, maxSlope);
 
-    if (distToGround >= 0.0f) {
-        float floorY = probeStart.y - distToGround;
-        if (position.y <= floorY + radius + 0.20f) {
-            position.y = floorY + radius;
-            grounded = true;
-            groundNormal = groundNorm;
-            if (velocity.y < 0.0f) velocity.y = 0.0f;
-        } else {
-            grounded = false;
-        }
+    grounded = hitFloor;
+    if (grounded) {
+        groundNormal = glm::normalize(floorNormal);
+        if (velocity.y < 0.0f) velocity.y = 0.0f;
     } else {
-        grounded = false;
+        // Smooth downward slope tracking (e.g. descending road hills)
+        SnapToGround(world, 0.50f);
     }
 }
+
+
 
 
 bool CharacterController::SnapToGround(const CollisionMesh &world, float maxDrop) {
