@@ -31,7 +31,12 @@ set(SHO_PORT_SOURCES
     src/World/World.cpp
     src/Bridge/LevelBridge.cpp
     src/Audio/AudioEntities.cpp
+    src/Triggers/TriggerSystem.cpp
+    src/Audio/AudioEngine.cpp
+    src/Environment/FogSystem.cpp
     src/Puzzle/PuzzleBase.cpp
+
+
     src/Puzzle/AnatomyPuzzle.cpp
     src/Puzzle/FlaurosPuzzle.cpp
     src/Puzzle/LaundryPuzzle.cpp

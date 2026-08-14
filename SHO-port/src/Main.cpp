@@ -24,6 +24,11 @@
 #include "SHO/Combat/CombatSystem.h"
 #include "SHO/Puzzle/PuzzleManager.h"
 #include "SHO/Progression/PlayerData.h"
+#include "SHO/Audio/AudioEngine.h"
+#include "SHO/Environment/FogSystem.h"
+#include "SHO/Triggers/TriggerSystem.h"
+#include "SHO/Core/MessageRelay.h"
+
 
 #include "ClimaxEngine/Core/RWS/FileSystem/CArchiveManager.h"
 #include "ClimaxEngine/Loader/Loader.h"
@@ -296,54 +301,8 @@ public:
     }
 };
 
-// Authentic PS2 Sony ADPCM Audio Banks
-static std::vector<AudioClip> g_RoadFootsteps;
-static std::vector<AudioClip> g_HospitalFootsteps;
-static std::vector<AudioClip> g_PlayerSfx;
-
-void LoadGlobalPlayerAudio() {
-    auto* arc = ClimaxEngine::RWS::FileSystem::CArchiveManager::GetInstance().GetFirstArchive();
-    if (!arc) return;
-
-    int testIdx = arc->Find("Audiotest");
-    if (testIdx >= 0) {
-        std::vector<uint8_t> data;
-        if (arc->Read(testIdx, data)) {
-            for (size_t i = 0; i + 16 <= data.size(); ++i) {
-                if (data[i] == 0x09 && data[i+1] == 0x08 && data[i+2] == 0x00 && data[i+3] == 0x00) {
-                    std::vector<AudioClip> allSteps;
-                    Audio::ParseWaveDictionary(&data[i], data.size() - i, allSteps);
-                    for (const auto& s : allSteps) {
-                        if (s.name == "footstep_road1" || s.name == "footstep_road2" ||
-                            s.name == "footstep_road3" || s.name == "footstep_road4") {
-                            g_RoadFootsteps.push_back(s);
-                        } else if (s.name.find("tile") != std::string::npos || s.name.find("wood") != std::string::npos) {
-                            g_HospitalFootsteps.push_back(s);
-                        }
-                    }
-                    std::cout << "[AUDIO] Loaded " << g_RoadFootsteps.size() << " authentic road footstep samples." << std::endl;
-                    break;
-                }
-            }
-        }
-    }
-
-    int playerIdx = arc->Find("AudioPlayer");
-    if (playerIdx >= 0) {
-        std::vector<uint8_t> data;
-        if (arc->Read(playerIdx, data)) {
-            for (size_t i = 0; i + 16 <= data.size(); ++i) {
-                if (data[i] == 0x09 && data[i+1] == 0x08 && data[i+2] == 0x00 && data[i+3] == 0x00) {
-                    Audio::ParseWaveDictionary(&data[i], data.size() - i, g_PlayerSfx);
-                    std::cout << "[AUDIO] Loaded " << g_PlayerSfx.size() << " original player sfx from AudioPlayer." << std::endl;
-                    break;
-                }
-            }
-        }
-    }
-}
-
 } // namespace
+
 
 
 
@@ -421,9 +380,11 @@ int main(int argc, char** argv) {
         return 1;
     }
     std::cout << "[ARC] Mounted " << arcPath << " successfully." << std::endl;
-    LoadGlobalPlayerAudio();
+    SHO::Audio::AudioEngine::GetInstance().Init();
+    SHO::Environment::FogSystem::GetInstance().Init();
 
     // Initialize SHO-port Subsystems
+
 
     auto& world = SHO::World::World::GetInstance();
     world.Init();
@@ -561,17 +522,16 @@ int main(int argc, char** argv) {
                 if (event.key.keysym.sym == SDLK_ESCAPE) {
                     running = false;
                 } else if (event.key.keysym.sym == SDLK_f) {
-                    // Toggle Flashlight
-                    state.enableLights = !state.enableLights;
-                } else if (event.key.keysym.sym == SDLK_e || event.key.keysym.sym == SDLK_RETURN) {
-                    actionKeyPressed = true;
-                } else if (event.key.keysym.sym == SDLK_f) {
                     state.enableFlashlight = !state.enableFlashlight;
                     state.enableLights = state.enableFlashlight;
+                    SHO::Audio::AudioEngine::GetInstance().PlayFlashlightClick();
                     std::cout << "[FLASHLIGHT] " << (state.enableFlashlight ? "ON" : "OFF") << std::endl;
+                } else if (event.key.keysym.sym == SDLK_e || event.key.keysym.sym == SDLK_RETURN) {
+                    actionKeyPressed = true;
                 }
             }
         }
+
 
 
         // Start ImGui Frame
@@ -632,12 +592,14 @@ int main(int argc, char** argv) {
                 float stepInterval = isRunning ? 0.32f : 0.48f;
                 if (s_footstepTimer >= stepInterval) {
                     s_footstepTimer = 0.0f;
-                    if (!g_RoadFootsteps.empty()) {
-                        int pick = rand() % g_RoadFootsteps.size();
-                        ClimaxEngine::Viewer::PlayAudioClip(g_RoadFootsteps[pick]);
-                    }
+                    SHO::Audio::AudioEngine::GetInstance().PlayFootstep(
+                        (currentLevelName.find("HO_") != std::string::npos || currentLevelName.find("Room") != std::string::npos)
+                        ? SHO::Audio::SurfaceMaterial::Tile
+                        : SHO::Audio::SurfaceMaterial::Road
+                    );
                 }
             }
+
         }
 
         // Update Travis Flashlight (SH2/SH3 Style Cinematic Dynamic Spotlight from chest pocket)
