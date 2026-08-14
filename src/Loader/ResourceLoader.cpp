@@ -1,4 +1,7 @@
 #include "GeometryDecoder.h"
+#include <array>
+#include <cstring>
+#include <vector>
 #include "ClimaxEngine/SG/SceneObject.h"
 #include "ClimaxEngine/Loader/ResourceLoader.h"
 #include "ClimaxEngine/Platform/PS2/PS2Texture.h"
@@ -101,10 +104,22 @@ void CResourceHandler::ProcessStream(const char* streamName, RWS::RwStream* stre
             if (bytesRead < chunk.size) {
                 stream->Skip(chunk.size - bytesRead);
             } else if (bytesRead > chunk.size) {
-                // Over-read cannot be undone by skipping; the walk is already
-                // off the rails and every later chunk would be garbage.
-                std::cout << "[stream] over-read, abandoning '" << streamName << "'\n";
-                break;
+                // An over-read cannot be undone by *skipping*, but it can be
+                // undone by seeking: this is a range over a buffer, not a real
+                // sequential stream, and the chunk header already said where
+                // the next one starts.
+                //
+                // Abandoning the container here was costing real data. A 0x716
+                // shell whose payload is a JPEG -- HO_1_ExamRoom has four --
+                // reads as a chunk of type 0xE0FFD8FF (the JFIF marker) with a
+                // nonsense size, so the shell handler walks off the end and the
+                // whole walk stopped at that point. In HO_1_ExamRoom that is
+                // offset 832350 of 1597782: the four JPEGs, both rwID_RWS audio
+                // streams and the rwID_WORLD at 1047742 were never read at all.
+                std::cout << "[stream] handler over-read chunk 0x" << std::hex
+                          << chunk.type << std::dec << " at " << chunkStart
+                          << " in '" << streamName << "'; resyncing\n";
+                stream->Seek(chunkStart + 12 + chunk.size);
             }
         } else {
             // Unhandled chunk, skip it
@@ -117,10 +132,54 @@ void CResourceHandler::ProcessStream(const char* streamName, RWS::RwStream* stre
 
 // --- Specific Loaders Stub ---
 
+// Every level container ships its room more than once.
+//
+// Measured over SH.ARC: no container has one rwID_WORLD. 33 have two and 181
+// have three, and in 98 of them a pair has a byte-identical 64-byte world
+// Struct -- the same bounding box, the same everything the header records --
+// while the payloads differ and the second is consistently about 12% larger.
+// They are not a platform pair: both carry rwID_NATIVEDATAPLG (0x510), so both
+// are PS2 native geometry. They are not different areas: HO_1_ExamRoom's two
+// share 53 of their 55 materials, differing only in one wall tile and a
+// `GreyAlpha_` variant of one slider.
+//
+// So it is the same room, built twice, and drawing both means every surface is
+// drawn twice. Opaque surfaces z-fight; everything blended composites twice
+// and comes out at roughly double strength, which is what a map, a save point
+// and a mannequin "glowing" look like.
+//
+// Which of the two the engine actually instantiates is not established -- that
+// needs the scene queue's resource pick read out of SLES_551.47 -- so this does
+// the one thing that is safe without knowing: it keeps the first and skips a
+// later world whose Struct header is identical to one already taken. A world
+// with a different header (the small third one, 3574 bytes here) is untouched.
+static std::vector<std::array<uint8_t, 64>> s_worldStructs;
+
+void ResetWorldDedupe() { s_worldStructs.clear(); }
+
 bool CWorldStreamLoader::Read(const char* name, RWS::RwStream* stream, uint32_t length) {
     std::cout << "[ResourceLoader] Found CWorldStreamLoader chunk (size: " << length << ")\n";
     std::vector<uint8_t> data(length);
     if (stream->Read(data.data(), length) == length) {
+        // The world's Struct is its first child: 12 bytes of header, then the
+        // 64 bytes that describe the world itself.
+        if (length >= 76) {
+            uint32_t st = 0;
+            std::memcpy(&st, data.data(), 4);
+            if (st == 0x01) {
+                std::array<uint8_t, 64> key{};
+                std::memcpy(key.data(), data.data() + 12, 64);
+                for (const auto& seen : s_worldStructs) {
+                    if (seen == key) {
+                        std::cout << "[ResourceLoader] world '" << name
+                                  << "' repeats a world already loaded in this "
+                                     "container; skipped\n";
+                        return true;
+                    }
+                }
+                s_worldStructs.push_back(key);
+            }
+        }
         auto obj = std::make_shared<::ClimaxEngine::SG::CWorldObject>(name);
         DecodeRenderWareGeometry(name, data.data(), length, true, obj.get());
         ::ClimaxEngine::SG::CSceneObjectRegistrar::GetInstance().RegisterObject(obj);

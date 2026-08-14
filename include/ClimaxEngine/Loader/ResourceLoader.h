@@ -21,6 +21,10 @@ struct RwChunk {
     bool Read(RWS::RwStream* stream);
 };
 
+// Clears the per-container record of which worlds have been taken. Call once
+// before loading a container; see CWorldStreamLoader::Read for why.
+void ResetWorldDedupe();
+
 class CResourceHandler {
 public:
     static CResourceHandler& GetInstance();

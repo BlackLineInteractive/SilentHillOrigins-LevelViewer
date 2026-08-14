@@ -36,6 +36,7 @@
 #include "ClimaxEngine/Render/PlayerModel.h"
 #include "ClimaxEngine/Game/CharacterController.h"
 #include "ClimaxEngine/Game/PlayMain.h"
+#include "ClimaxEngine/Platform/PS2/RwsAudio.h"
 #include "ClimaxEngine/Game/CameraLinks.h"
 #include "ClimaxEngine/Game/ZoneLinks.h"
 #include "ClimaxEngine/Game/ButtonTriggers.h"
@@ -770,6 +771,17 @@ int main(int argc, char** argv) {
 
     SDL_GL_DeleteContext(glContext);
     SDL_DestroyWindow(window);
+
+    // Close the audio device before SDL goes away.
+    //
+    // CAudioRelay is a function-local static, so its destructor runs after
+    // main returns -- after SDL_Quit() has already torn the audio subsystem
+    // down. SDL_CloseAudioDevice on a dead subsystem is the segfault that
+    // followed "Clean shutdown complete": the message printed because main had
+    // finished, and the crash happened in the static destructors behind it.
+    // Shutdown() is idempotent, so the destructor still running later is fine.
+    ClimaxEngine::Audio::CAudioRelay::GetInstance().Shutdown();
+
     IMG_Quit();
     SDL_Quit();
 

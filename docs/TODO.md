@@ -498,8 +498,39 @@ vertex array. So that array is the face list:
 
     struct CollisionFace {   // 8 bytes
         uint16_t v0, v1, v2; // indices into the vertex array, stride 16
-        uint16_t flags;      // surface type: 24601, 40984, 24599 seen
+        uint16_t klass;      // see below
     };
+
+The fourth word is **not** a surface type, and "24601, 40984, 24599 seen" was
+three samples of something else. Read across whole levels it splits cleanly:
+
+    klass = (class << 12) | index
+
+`index` runs 0..395 in `IntroRoad` against 528 planes, 0..25 in
+`HO_1_Hallway1` against 37, so it points into the plane array. The top nibble
+is a **surface class**, and it is the same five values in every level measured,
+with the same geometry each time:
+
+    class  IntroRoad  Hallway1  ExamRoom   mean |Ny|
+     0x2      299        31         2        0.99-1.00   floor
+     0x8        2         -         -        1.00        floor, tiny
+     0x0       42        14        10        0.00        vertical
+     0x4       60        20        12        0.00        vertical
+     0x6       52        16        10        0.00        vertical
+     0xA       74        18        14        0.00        vertical
+
+Four separate classes of vertical surface, never mixed with the floor classes,
+in all three levels. Ghost Rider says what they are for:
+`CollisionBSP::TestSphere(RwV3d*, float, StIntersection*, int)` takes a fourth
+integer the port has no equivalent of, and `CollisionBSP::CastRay` is a
+separate entry point. So a query names which classes it cares about: walking,
+the camera and line of sight do not all hit the same surfaces.
+
+`CollisionMesh` keeps only `verts` and `indices` — the class word is read and
+dropped — so everything is solid to everything. That is the shape of an
+invisible wall: a surface meant for the camera or for sight blocking stops the
+player instead. Reading `TestSphere` in Ghost Rider settles which nibble is
+which; nothing else does.
 
 Verified before changing any code: all 99 records in `HO_1_Hallway1` index
 inside the 70-vertex array, and the triangles come out with a median area of
@@ -513,6 +544,40 @@ The fix took the overlay from a fan of spikes to real geometry:
 Two genuine index bugs were also fixed on the way and remain worth keeping:
 indices were not rebased between blocks, and a vertex failing the finite check
 was skipped rather than occupying its slot, shifting every later index.
+
+### 4d. Footsteps — the surface table is in the data, all of it
+
+`GlobalStream` holds exactly one `MaterialMap`, and its properties are the
+seventeen footstep surfaces the game has, in order:
+
+    0 carpet     1 dirtfloor  2 dirtroad   3 grass    4 gravel
+    5 laminate   6 lonely     7 mesh       8 metal    9 rusty1
+   10 rusty2    11 squelch   12 stone     13 tarmac  14 tile
+   15 water     16 wood
+
+What indexes it is the material's own `0x011F` UserData, under the key
+`surfaceType` — present in 204 of the 269 containers, 617 values in all. The
+values are **doubled indices**: every one is even, none exceeds 32, and 0..32
+step 2 covers the seventeen entries exactly with no gaps.
+
+    surfaceType / 2  ->  MaterialMap property index  ->  "footstep_<name>"
+
+    24 stone    x171      28 tile     x125      0 carpet   x57
+    18 rusty1   x47       10 laminate x41      16 metal    x40
+    26 tarmac   x30       32 wood     x25      14 mesh     x18
+     6 grass    x15        4 dirtroad x14      22 squelch  x9
+
+Five values out of 617 are odd (15 four times, 19 once) and floor onto the same
+entry; they read as authoring slips rather than a different encoding.
+
+So the sound a footstep makes is a property of the material the foot is over,
+not of the collision face, and the whole mapping is recoverable without the
+executable. `SHO-port`'s `AudioEngine` currently carries a hand-written three
+-surface table ("4 road, 4 tile, 4 wood samples") that is not the game's.
+
+Still open: which cue name resolves to which sample in the level's
+`rwaID_WAVEDICT` (IntroRoad has 21), and how the material under the player is
+found at run time — the collision face indexes a plane, not a material.
 
 ### 5. Rooms with no lighting
 
@@ -834,9 +899,26 @@ defaults it writes line up one for one with the property table:
     prop  8 -> +0xA4 float    0.7     colour b
     prop  1 -> +0x50/+0x54    1500
 
-`Loader.cpp` already reads exactly indices 2, 3, 5, 10, 11 and 8, so the fog
-path -- parse, `ViewerApp` -> `state`, shader mix in `ViewerGraphics.cpp` -- was
-right all along and is now backed by the executable rather than by inference.
+`Loader.cpp` reads exactly indices 2, 3, 5, 10, 11 and 8, so the *offsets* are
+confirmed by the executable.
+
+**What is not confirmed, and what this paragraph used to claim, is that the fog
+path is therefore right.** It is not. Two things settle that, both read out of
+the shipped objects:
+
+* **Property 0 is a texture name.** `FX_fog_ALPHA` in `IntroRoad` and the Motel
+  levels, `FX_fog2_ALPHA` in the Dahlia house. The game's fog is a configured
+  sheet, not a depth fade tinted by an RGB triple, which is also the answer to
+  "there is no moving fog": the moving fog *is* the fog.
+* **10/11/8 are probably not r/g/b.** They are adjacent floats at +0x9C, +0xA0,
+  +0xA4 with plausible defaults, and that is the whole basis for the reading.
+  Property 12 sits at +0x98, immediately before them, and is **-0.2** in
+  `IntroRoad` -- so the four are not a colour block. Read as a colour the values
+  give green fog in most levels, which does not match the game.
+
+Nineteen properties describe this object and the port reads six. The next step
+is not more inference from offsets: it is finding what reads +0x98..+0xAC at run
+time.
 
 ### 6f. The scene queue, and what "start the game properly" needs
 

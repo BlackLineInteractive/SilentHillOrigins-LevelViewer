@@ -1456,24 +1456,42 @@ int ClimaxEngine::Game::RunFrontEnd(int argc, char **argv,
         introFade = 0.0f;
     }
 
+    // Cutscenes can be skipped, and the engine says so itself: `IGCStart`,
+    // `IGCActive`, `IGCSkipRequest`, `IGCSkip` and `IGCEnd` are five of the
+    // 206 registered messages (docs/executables/MESSAGES.md). A request is a
+    // separate message from the skip, so something arbitrates -- but the
+    // player-facing half is plain: a button ends the clip.
+    //
+    // Which button comes from the boot table's own movie record,
+    // `FUN_00152218`, which tests the remapped mask against 0x120 -- cross or
+    // start. That record also carries a skippable flag, and the Logo record's
+    // is 0, which is why the logo cannot be skipped and this can.
+    bool skipIntro = false;
+    if (playingIntro && (in.accept || in.cancel))
+      skipIntro = true;
+
 #ifdef CLIMAX_HAVE_FFMPEG
     // The intro runs on the same player the boot movies use, and ends the same
     // way they do -- when the clip runs out, not on a timer.
-    if (haveVideoSupport && playingIntro && bgVideo.IsOpen()) {
+    if (haveVideoSupport && playingIntro && bgVideo.IsOpen())
       bgVideo.Update(dt);
-      if (bgVideo.Finished()) {
-        host.stopMovie();
-        playingIntro = false;
-        std::fprintf(stderr, "[play] intro finished\n");
-        // FUN_001CF718: new game -> the first scene.
-        if (!sceneStarted) {
-          sceneStarted = true;
-          sceneQueue.LoadScene("IntroRoad");
-          std::fprintf(stderr, "[scene] queue: IntroRoad\n");
-        }
+    if (playingIntro && (skipIntro || (bgVideo.IsOpen() && bgVideo.Finished()))) {
+#else
+    if (playingIntro && skipIntro) {
+#endif
+      host.stopMovie();
+      playingIntro = false;
+      std::fprintf(stderr, "[play] intro %s\n",
+                   skipIntro ? "skipped" : "finished");
+      // FUN_001CF718: new game -> the first scene.
+      if (!sceneStarted) {
+        sceneStarted = true;
+        sceneQueue.LoadScene("IntroRoad");
+        std::fprintf(stderr, "[scene] queue: IntroRoad\n");
       }
     }
-    if (haveVideoSupport && inMenu) {
+#ifdef CLIMAX_HAVE_FFMPEG
+    if (haveVideoSupport && inMenu && !sceneStarted) {
       const UI::Element *scr = front.Menu().Screen();
       std::string requestedMovie = scr ? scr->Attr("bgmovie") : "";
 
@@ -1500,6 +1518,13 @@ int ClimaxEngine::Game::RunFrontEnd(int argc, char **argv,
     }
 #endif
 
+    // The menu loop is part of the menu; once the queue is running it has to
+    // stop with everything else, or the level comes up over menu music.
+#ifdef CLIMAX_HAVE_FFMPEG
+    if (sceneStarted && menuVideo.IsOpen())
+      menuVideo.Close();
+#endif
+
     static float currentMusicVolume = 0.0f;
     if (inMenu && menuFadeTimer > 0.0f) {
       menuFadeTimer -= dt;
@@ -1507,7 +1532,7 @@ int ClimaxEngine::Game::RunFrontEnd(int argc, char **argv,
         menuFadeTimer = 0.0f;
     }
     if (inMenu) {
-        float target = (front.Menu().ScreenId() == "mainmenu") ? 1.0f : 0.0f;
+        float target = (!sceneStarted && front.Menu().ScreenId() == "mainmenu") ? 1.0f : 0.0f;
         if (currentMusicVolume < target) {
             currentMusicVolume += dt * 0.5f; // Fade in over 2s
             if (currentMusicVolume > target) currentMusicVolume = target;
@@ -1589,7 +1614,12 @@ int ClimaxEngine::Game::RunFrontEnd(int argc, char **argv,
     // "Loading" stage that the state table does not have.
     const UI::Element *scr = nullptr;
     std::string activeId;
-    if (inMenu) {
+    // Once the scene queue is running the front end is over, whatever the menu
+    // state machine still thinks. Drawing the screen here put the new-game
+    // options back on top of the load -- the clip ended, the queue started, and
+    // for the seconds it takes to read four megabytes the player was looking at
+    // "subtitles / vibration" again instead of at black.
+    if (inMenu && !sceneStarted) {
       scr = front.Menu().Screen();
       activeId = front.Menu().ActiveId();
     }

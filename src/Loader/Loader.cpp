@@ -388,6 +388,7 @@ void LoadLevelData(const std::string &displayName,
   
   // Use StreamLoader to process the entire container
   ClimaxEngine::RWS::RwMemoryStream stream(container.data(), container.size());
+  ClimaxEngine::ResourceLoader::ResetWorldDedupe();
   ClimaxEngine::ResourceLoader::CResourceHandler::GetInstance().ProcessStream(displayName.c_str(), &stream, container.size());
 
   // Textures
@@ -531,6 +532,7 @@ void LoadTexturesFromTxd(const std::string &txdPath,
 void LoadGeometry(const std::string &geomPath) {
   std::vector<uint8_t> data = ReadWholeFile(geomPath);
   ClimaxEngine::RWS::RwMemoryStream stream(data.data(), data.size());
+  ClimaxEngine::ResourceLoader::ResetWorldDedupe();
   ClimaxEngine::ResourceLoader::CResourceHandler::GetInstance().ProcessStream(geomPath.c_str(), &stream, data.size());
 }
 
@@ -758,6 +760,8 @@ static void ParseGameObject(const std::vector<uint8_t> &data, size_t off,
               if (propId == 2 && val >= 0.0f && val < 500.0f) go.fogStart = val;
               if (propId == 3 && val > 0.0f && val < 500.0f) go.fogEnd = val;
               if (propId == 5 && val >= 0.0f && val < 10.0f) go.fogDensity = val;
+              // These three are read as an RGB triple, and that reading is
+              // NOT established -- see the note below.
               if (propId == 10 && val >= 0.0f && val <= 1.0f) go.fogColor.r = val;
               if (propId == 11 && val >= 0.0f && val <= 1.0f) go.fogColor.g = val;
               if (propId == 8 && val >= 0.0f && val <= 1.0f) go.fogColor.b = val;
@@ -767,9 +771,26 @@ static void ParseGameObject(const std::vector<uint8_t> &data, size_t off,
       }
       q += 8 + rs;
     }
-    // Sanitize green tint or extreme values
+    // A stand-in, and it is worth being honest about what it stands in for.
+    //
+    // The game's fog is not this. CFogConfig property 0 is a *texture name* --
+    // `FX_fog_ALPHA` in IntroRoad and the Motel, `FX_fog2_ALPHA` in the Dahlia
+    // house -- so what the original draws is a configured sheet, not a depth
+    // fade tinted by an RGB triple. Nineteen properties describe it and this
+    // reads six of them.
+    //
+    // Treating 10/11/8 as r/g/b came from those three offsets (+0x9C, +0xA0,
+    // +0xA4) being adjacent floats with plausible defaults, not from reading
+    // the code that consumes them, and property 12 at +0x98 -- the float right
+    // before them -- is negative in IntroRoad (-0.2), so the four are not a
+    // colour block. Taken as a colour the values come out green in most levels,
+    // which does not match the game.
+    //
+    // So the clamp and this correction stay until the consumer is read. They
+    // are not a reading of the engine; they are what keeps the approximation
+    // looking like fog.
     if (go.fogColor.g > go.fogColor.r * 1.5f || go.fogColor.g > go.fogColor.b * 1.5f ||
-        go.fogColor.r <= 0.01f && go.fogColor.g <= 0.01f && go.fogColor.b <= 0.01f) {
+        (go.fogColor.r <= 0.01f && go.fogColor.g <= 0.01f && go.fogColor.b <= 0.01f)) {
         go.fogColor = glm::vec3(0.11f, 0.12f, 0.14f);
     }
   }
@@ -1098,6 +1119,7 @@ void ParseContainerStructureData(const std::vector<uint8_t> &data) {
 
   // New StreamLoader API
   ClimaxEngine::RWS::RwMemoryStream memStream(data);
+  ClimaxEngine::ResourceLoader::ResetWorldDedupe();
   ClimaxEngine::ResourceLoader::CResourceHandler::GetInstance().ProcessStream("Container", &memStream, sz);
 
   ParseUVAnimations(data);
