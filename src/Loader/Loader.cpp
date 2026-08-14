@@ -755,19 +755,25 @@ static void ParseGameObject(const std::vector<uint8_t> &data, size_t off,
               uint32_t bits = ru32l(payload);
               float val;
               std::memcpy(&val, &bits, 4);
-              if (propId == 2) go.fogStart = val;
-              if (propId == 3) go.fogEnd = val;
-              if (propId == 5) go.fogDensity = val;
-              if (propId == 10) go.fogColor.r = val;
-              if (propId == 11) go.fogColor.g = val;
-              if (propId == 8) go.fogColor.b = val;
+              if (propId == 2 && val >= 0.0f && val < 500.0f) go.fogStart = val;
+              if (propId == 3 && val > 0.0f && val < 500.0f) go.fogEnd = val;
+              if (propId == 5 && val >= 0.0f && val < 10.0f) go.fogDensity = val;
+              if (propId == 10 && val >= 0.0f && val <= 1.0f) go.fogColor.r = val;
+              if (propId == 11 && val >= 0.0f && val <= 1.0f) go.fogColor.g = val;
+              if (propId == 8 && val >= 0.0f && val <= 1.0f) go.fogColor.b = val;
           }
           rq += 12 + propSize;
         }
       }
       q += 8 + rs;
     }
+    // Sanitize green tint or extreme values
+    if (go.fogColor.g > go.fogColor.r * 1.5f || go.fogColor.g > go.fogColor.b * 1.5f ||
+        go.fogColor.r <= 0.01f && go.fogColor.g <= 0.01f && go.fogColor.b <= 0.01f) {
+        go.fogColor = glm::vec3(0.11f, 0.12f, 0.14f);
+    }
   }
+
 
   if (go.className == "CColorLight") {
     go.isLight = true;

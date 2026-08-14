@@ -183,6 +183,7 @@ set(IMGUIZMO_SOURCES ${IMGUIZMO_DIR}/ImGuizmo.cpp)
 set(IMANIM_SOURCES   ${CMAKE_SOURCE_DIR}/src/UI/ImAnim/im_anim.cpp)
 
 # ── Toolkit exe  (SDL + GL + ImGui) ───────────────────────────────────────────
+
 set(TOOLKIT_RENDER_SOURCES
     src/Rendering/RenderBackend.cpp
     src/Rendering/GLSLBackend.cpp
@@ -259,7 +260,11 @@ if(ENABLE_LIBRW)
     target_compile_definitions(ClimaxGameEngineToolkit PRIVATE ENABLE_LIBRW=1)
 endif()
 
+# ── sho-port (Silent Hill Origins Port Foundation) ───────────────────────────
+add_subdirectory(SHO-port)
+
 target_link_libraries(ClimaxGameEngineToolkit
+
     climax-game     # includes climax-core transitively
     OpenGL::GL
     GLEW::GLEW

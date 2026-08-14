@@ -31,7 +31,8 @@ game-iso/
 
 decomp/
 
-SHO-port/
+SHO-port/MOVIES/
+SHO-port/MUSIC/
 
 # Editor / IDE
 .vscode/

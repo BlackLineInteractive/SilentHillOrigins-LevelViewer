@@ -151,12 +151,17 @@ struct ViewerState {
   bool frozenVariant = false;
   bool iceShading = true;
 
+  // SH2/SH3 Flashlight System
+  bool      enableFlashlight = true;
+  glm::vec3 flashlightPos = glm::vec3(0.0f);
+  glm::vec3 flashlightDir = glm::vec3(0.0f, 0.0f, 1.0f);
+  glm::vec3 flashlightColor = glm::vec3(1.0f, 0.96f, 0.88f);
+  float     flashlightRange = 14.0f;
+  float     flashlightInnerAngle = 0.95f; // cos(~18 deg)
+  float     flashlightOuterAngle = 0.72f; // cos(~44 deg)
+
   // Fog settings
   bool  enableLights = true;   // the level's own CColorLight objects
-  // How much a placed light lifts the surface it reaches. Not read from the
-  // game -- CColorLight gives a colour and a range, and how the engine weighs
-  // that against the baked vertex colour is still unknown, so this is a knob
-  // rather than a constant pretending to be measured.
   float lightIntensity = 1.0f;
   bool  enableFog = false;
   bool  useNativeFog = true;
@@ -166,6 +171,7 @@ struct ViewerState {
   float fogDensity = 0.05f;
   int   fogMode = 0; // 0=Linear, 1=Exp, 2=Exp2
 };
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Global scene state (toolkit only)

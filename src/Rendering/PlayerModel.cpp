@@ -76,7 +76,7 @@ void PlayerModel::Advance(float dt) {
     for (auto &obj : objects)
         if (auto *clump =
                 dynamic_cast<ClimaxEngine::SG::CClumpObject *>(obj.get()))
-            clump->animTime += dt;
+            clump->AdvanceTime(dt);
 }
 
 // True when `clip` was authored for `skel`: the same number of animated bones.
@@ -101,25 +101,25 @@ int PlayerModel::FindClip(const std::string &name) const {
 }
 
 std::string PlayerModel::PlayClipAt(int i) {
-    currentClip = -1;
-    for (auto &obj : objects)
-        if (auto *c = dynamic_cast<ClimaxEngine::SG::CClumpObject *>(obj.get()))
-            c->animClip = AnimClip{};   // back to the rest pose
-
-    if (i < 0 || i >= (int)usableClips.size())
+    if (i < 0 || i >= (int)usableClips.size()) {
+        currentClip = -1;
+        for (auto &obj : objects)
+            if (auto *c = dynamic_cast<ClimaxEngine::SG::CClumpObject *>(obj.get()))
+                c->CrossfadeTo(AnimClip{}, 0.2f);
         return "rest pose";
+    }
 
     const AnimClip &clip = clips[(size_t)usableClips[(size_t)i]];
     for (auto &obj : objects) {
         auto *c = dynamic_cast<ClimaxEngine::SG::CClumpObject *>(obj.get());
         if (c && ClipFits(c->skeleton, clip)) {
-            c->animClip = clip;
-            c->animTime = 0.0f;
+            c->CrossfadeTo(clip, 0.2f);
         }
     }
     currentClip = i;
     return clip.name.empty() ? "unnamed" : clip.name;
 }
+
 
 std::string PlayerModel::CycleClip(int delta) {
     if (usableClips.empty())

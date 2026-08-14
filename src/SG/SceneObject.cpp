@@ -47,14 +47,57 @@ void CWorldObject::SetMatrixAndDraw(const RenderContext& ctx, MeshChunk* chunk) 
 // pieces by their frame's matrix rather than blending vertices.
 //
 // The rest-pose matrix is already baked into the vertices at load time, so what
-// is applied here is the difference: animated frame matrix times the inverse of
-// the rest one. A piece whose frame has no track stays exactly where it was.
+void CClumpObject::CrossfadeTo(const AnimClip& newClip, float duration) {
+    if (animClip.tracks.empty() || blendWeight < 0.01f) {
+        animClip = newClip;
+        animTime = 0.0f;
+        prevClip = AnimClip{};
+        blendWeight = 1.0f;
+        return;
+    }
+
+    prevClip = animClip;
+    prevAnimTime = animTime;
+    animClip = newClip;
+    animTime = 0.0f;
+    blendWeight = 0.0f;
+    blendDuration = duration > 0.01f ? duration : 0.22f;
+}
+
+void CClumpObject::AdvanceTime(float dt) {
+    animTime += dt;
+    if (blendWeight < 1.0f) {
+        prevAnimTime += dt;
+        blendWeight += dt / blendDuration;
+        if (blendWeight > 1.0f) blendWeight = 1.0f;
+    }
+}
+
+static void SampleTrack(const AnimTrack& tr, float time, glm::vec3& outPos, glm::quat& outRot) {
+    if (tr.times.empty()) return;
+    if (time <= tr.times.front()) {
+        outPos = tr.pos.front();
+        outRot = tr.rot.front();
+        return;
+    }
+    if (time >= tr.times.back()) {
+        outPos = tr.pos.back();
+        outRot = tr.rot.back();
+        return;
+    }
+    auto it = std::lower_bound(tr.times.begin(), tr.times.end(), time);
+    size_t i1 = (size_t)std::distance(tr.times.begin(), it);
+    size_t i0 = i1 - 1;
+    float span = tr.times[i1] - tr.times[i0];
+    float f = span > 1e-6f ? (time - tr.times[i0]) / span : 0.0f;
+    outPos = glm::mix(tr.pos[i0], tr.pos[i1], f);
+    outRot = glm::slerp(tr.rot[i0], tr.rot[i1], f);
+}
+
 void CClumpObject::SetMatrixAndDraw(const RenderContext& ctx, MeshChunk* chunk) {
     glm::mat4 model = m_transform;
     bool skinned = false;
 
-    // Whichever clip is playing: the one bound to this object, or the one the
-    // player picked out of the container's list.
     const AnimClip* clip = nullptr;
     if (animClip.duration > 0.0f && !animClip.tracks.empty())
         clip = &animClip;
@@ -62,29 +105,10 @@ void CClumpObject::SetMatrixAndDraw(const RenderContext& ctx, MeshChunk* chunk) 
              state.animClipIndex < (int)g_AnimClips.size())
         clip = &g_AnimClips[(size_t)state.animClipIndex];
 
-    // A clip only belongs to the skeleton it was authored for. The container
-    // holds clips for every skeleton it ships -- Butcher has five -- and
-    // driving a 53-track clip through a 9-bone arm, or a 34-track one through
-    // the full body, animates some bones and leaves the rest at rest, which
-    // stretches whatever spans the two into spikes.
-    if (clip) {
-        int tracks = 0;
-        for (const Bone &bn : skeleton.bones)
-            if (bn.trackIndex >= 0) tracks++;
-        if ((size_t)tracks != clip->tracks.size()) clip = nullptr;
-    }
-
-    // A piece animates if it is rigidly bound to a frame, or if it is skinned.
-    //
-    // Requiring a frame kept the skinned pieces still. frameIndex is only
-    // resolved from the Skin PLG when a geometry touches exactly one bone --
-    // that is what makes a segment rigid -- so anything weighted across several
-    // bones came out with -1 and skipped this block entirely, skinning and all.
-    // On Travis that is the face and the parts parented to it: they load, they
-    // are textured, and they stay behind while the body walks off.
     const bool canSkin = chunk->hasWeights && state.animSkinning;
     const bool haveFrame = chunk->frameIndex >= 0 &&
                            chunk->frameIndex < (int)skeleton.bones.size();
+
 
     if (!skeleton.bones.empty() && (canSkin || haveFrame) &&
         (clip || state.animRestPose)) {
@@ -93,33 +117,35 @@ void CClumpObject::SetMatrixAndDraw(const RenderContext& ctx, MeshChunk* chunk) 
         const float dur = clip ? clip->duration : 0.0f;
         const float t = dur > 0.0f ? std::fmod(animTime, dur) : 0.0f;
 
+        const float prevDur = prevClip.tracks.empty() ? 0.0f : prevClip.duration;
+        const float prevT = prevDur > 0.0f ? std::fmod(prevAnimTime, prevDur) : 0.0f;
+
         std::vector<glm::mat4> rest(n), posed(n);
         for (size_t b = 0; b < n; ++b) {
             const Bone& bone = skeleton.bones[b];
             glm::mat4 local = bone.restLocal;
 
-            // The clip's tracks are ordered by the HAnim table, which is not
-            // the frame order -- trackIndex is the bone's place in it.
             if (clip && !state.animRestPose && bone.trackIndex >= 0 &&
                 bone.trackIndex < (int)clip->tracks.size()) {
                 const AnimTrack& tr = clip->tracks[(size_t)bone.trackIndex];
                 if (!tr.times.empty()) {
-                    size_t i0 = 0, i1 = 0;
-                    float f = 0.0f;
-                    if (t <= tr.times.front()) {
-                        i0 = i1 = 0;
-                    } else if (t >= tr.times.back()) {
-                        i0 = i1 = tr.times.size() - 1;
+                    glm::vec3 curPos(0.0f);
+                    glm::quat curRot(1.0f, 0.0f, 0.0f, 0.0f);
+                    SampleTrack(tr, t, curPos, curRot);
+
+                    if (blendWeight < 1.0f && !prevClip.tracks.empty() &&
+                        bone.trackIndex < (int)prevClip.tracks.size() &&
+                        !prevClip.tracks[(size_t)bone.trackIndex].times.empty()) {
+                        glm::vec3 prevPos(0.0f);
+                        glm::quat prevRot(1.0f, 0.0f, 0.0f, 0.0f);
+                        SampleTrack(prevClip.tracks[(size_t)bone.trackIndex], prevT, prevPos, prevRot);
+
+                        glm::vec3 p = glm::mix(prevPos, curPos, blendWeight);
+                        glm::quat q = glm::slerp(prevRot, curRot, blendWeight);
+                        local = glm::translate(glm::mat4(1.0f), p) * glm::mat4_cast(q);
                     } else {
-                        auto it = std::lower_bound(tr.times.begin(), tr.times.end(), t);
-                        i1 = (size_t)std::distance(tr.times.begin(), it);
-                        i0 = i1 - 1;
-                        const float span = tr.times[i1] - tr.times[i0];
-                        f = span > 1e-6f ? (t - tr.times[i0]) / span : 0.0f;
+                        local = glm::translate(glm::mat4(1.0f), curPos) * glm::mat4_cast(curRot);
                     }
-                    const glm::vec3 p = glm::mix(tr.pos[i0], tr.pos[i1], f);
-                    const glm::quat q = glm::slerp(tr.rot[i0], tr.rot[i1], f);
-                    local = glm::translate(glm::mat4(1.0f), p) * glm::mat4_cast(q);
                 }
             }
 
@@ -131,6 +157,7 @@ void CClumpObject::SetMatrixAndDraw(const RenderContext& ctx, MeshChunk* chunk) 
 
         currentBoneMats = posed;
         restBoneMats = rest;
+
 
         if (canSkin) {
             // The native data indexes bones by their place in the HAnim table,

@@ -109,9 +109,40 @@ uniform float fogStart;
 uniform float fogEnd;
 uniform float fogDensity;
 uniform int   fogMode;
+uniform float time;
 
+uniform bool  enableFlashlight;
+uniform vec3  flashlightPos;
+uniform vec3  flashlightDir;
+uniform vec3  flashlightColor;
+uniform float flashlightRange;
+uniform float flashlightInnerAngle;
+uniform float flashlightOuterAngle;
+
+
+float hash2D(vec2 p) {
+    p = 50.0 * fract(p * 0.3183099 + vec2(0.71, 0.113));
+    return -1.0 + 2.0 * fract(p.x * p.y * (p.x + p.y));
+}
+
+float noise2D(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash2D(i + vec2(0.0, 0.0)), hash2D(i + vec2(1.0, 0.0)), u.x),
+               mix(hash2D(i + vec2(0.0, 1.0)), hash2D(i + vec2(1.0, 1.0)), u.x), u.y);
+}
+
+float fbmFog(vec2 p) {
+    float v = 0.0;
+    v += 0.5000 * noise2D(p); p *= 2.02;
+    v += 0.2500 * noise2D(p); p *= 2.03;
+    v += 0.1250 * noise2D(p);
+    return v;
+}
 
 void main(){
+
     vec3 dx = dFdx(fragWorldPos);
     vec3 dy = dFdy(fragWorldPos);
     vec3 N  = normalize(cross(dx, dy));
@@ -183,16 +214,15 @@ void main(){
     } else {
         // Textured (default, renderMode == 0)
         vec4 tex = texture(t, TC);
-        // Discard only what is fully transparent. Cutting at 0.1 threw away the
-        // whole soft edge of a gradient and left a hard jagged border where the
-        // game fades out smoothly; the rest is handled by alpha blending.
-        // A material whose blend op is NONE has no coverage channel: the
-        // engine writes it with SRCBLEND ONE / DESTBLEND ZERO and never looks
-        // at alpha. Character heads and bodies are all declared that way, and
-        // their textures are barely opaque anywhere -- nurse_head has 1% opaque
-        // texels and a third of it below this threshold -- so testing alpha on
-        // them discarded the face and left the head bare.
-        if(!alphaOff && tex.a < 0.02) discard;
+        if(!alphaOff) {
+            if (additive) {
+                if (tex.a < 0.02) discard;
+            } else {
+                if (tex.a < 0.48) discard;
+            }
+        }
+
+
         // Additive effect sheets carry their own brightness. Multiplying their
         // RGB by the baked vertex lighting drives them to black in a dark room,
         // which is why they only showed up with vertex colours switched off.
@@ -207,29 +237,44 @@ void main(){
         vec4 col;
         if(useVertexColors && !unlitGeometry)
             col = additive ? vec4(tex.rgb, tex.a * VC.a) : tex * VC;
+        else if (unlitGeometry)
+            col = tex; // Emissive light-box / X-ray viewer / monitors
         else
-            col = tex;
+            col = vec4(tex.rgb * 0.42, tex.a); // Natural dark baseline for unbaked character models
         col.rgb *= brightness;
         if(alphaOff) col.a = 1.0;
         FragColor = col;
     }
 
-    // Lit before fog, so fog sits on top of the lit colour the way it does on
-    // the console. Modulating rather than adding keeps a texture's own colour:
-    // an unlit room stays as its baked vertex colour, a lit one is brightened.
-    // Only on surfaces with no baked light. A world surface already carries
-    // its lighting in the vertex colours, so adding CColorLight on top of it
-    // lights the room twice -- that is what turned HO_1_ExamRoom white.
-    // `unlitGeometry` marks the pieces whose vertex colours are all zero: those
-    // are the ones the engine has to light at run time, and they are what these
-    // placed lights are for.
+    // Dynamic SH2/SH3 Cinematic Spotlight Flashlight
+    if (enableFlashlight && renderMode == 0 && !additive) {
+        vec3 toLight = flashlightPos - fragWorldPos;
+        float dist = length(toLight);
+        if (dist < flashlightRange) {
+            vec3 L = toLight / max(dist, 0.001);
+            float cosTheta = dot(-L, normalize(flashlightDir));
+            float spot = clamp((cosTheta - flashlightOuterAngle) / max(0.001, flashlightInnerAngle - flashlightOuterAngle), 0.0, 1.0);
+            spot = spot * spot;
+            
+            if (spot > 0.0) {
+                // Smooth quadratic distance falloff with soft wrap
+                float atten = 1.0 / (1.0 + 0.12 * dist + 0.05 * dist * dist);
+                float NdotL = max(dot(N, L), 0.0);
+                float diff = NdotL * 0.85 + 0.15;
+                
+                vec3 V = normalize(eyePos - fragWorldPos);
+                vec3 H = normalize(L + V);
+                float spec = pow(max(dot(N, H), 0.0), 32.0) * 0.55;
+                
+                vec3 flashLit = flashlightColor * (diff + spec) * atten * spot * 3.2;
+                FragColor.rgb += FragColor.rgb * flashLit;
+            }
+        }
+    }
+
     if (lightCount > 0 && renderMode == 0 && unlitGeometry) {
         vec3 lit = vec3(0.0);
         for (int i = 0; i < lightCount; ++i) {
-            // The type is in the data and used to be ignored, so a fill light
-            // with a 1000-unit range was treated as a point light and drowned
-            // everything near it. Type 2 is the room's ambient term: no
-            // position, no falloff. The rest fall off over their own range.
             if (lightType[i] == 2) {
                 lit += lightCol[i];
                 continue;
@@ -238,27 +283,42 @@ void main(){
             float a = 1.0 - clamp(d / max(lightRange[i], 0.001), 0.0, 1.0);
             lit += lightCol[i] * a * a;
         }
-        // Clamped, then scaled. The first version multiplied the surface by
-        // the raw sum, so two lights could more than double it and the room
-        // came out white. A placed light in this game lifts a dark corner; it
-        // does not relight the scene.
         lit = clamp(lit, 0.0, 1.0) * lightIntensity;
         FragColor.rgb += FragColor.rgb * lit;
     }
 
+
     if (enableFog && renderMode != 4 && renderMode != 3 && renderMode != 5) {
-        float dist = abs(dot(fragWorldPos - eyePos, viewDir));
+        float dist = length(fragWorldPos - eyePos);
+        
+        // Dynamic moving / swirling fog layer (billowing mist across the scene)
+        vec2 fogCoord1 = fragWorldPos.xz * 0.08 + vec2(time * 0.035, time * 0.015);
+        vec2 fogCoord2 = fragWorldPos.xz * 0.16 - vec2(time * 0.02, time * 0.03);
+        float swirl = fbmFog(fogCoord1) * 0.65 + fbmFog(fogCoord2) * 0.35; // -1.0 .. 1.0
+        
+        float effDist = dist * (1.0 + swirl * 0.22);
+        
         float f = 1.0;
         if (fogMode == 0) {
-            f = (fogEnd - dist) / (fogEnd - fogStart);
+            float range = max(0.001, fogEnd - fogStart);
+            f = (fogEnd - effDist) / range;
         } else if (fogMode == 1) {
-            f = exp(-fogDensity * dist);
+            f = exp(-fogDensity * effDist);
         } else if (fogMode == 2) {
-            f = exp(-pow(fogDensity * dist, 2.0));
+            f = exp(-pow(fogDensity * effDist, 2.0));
         }
         f = clamp(f, 0.0, 1.0);
-        FragColor.rgb = mix(fogColor, FragColor.rgb, f);
+        
+        vec3 activeFogCol = fogColor + vec3(swirl * 0.012);
+
+        if (additive) {
+            FragColor.rgb *= f;
+            FragColor.a *= f;
+        } else {
+            FragColor.rgb = mix(activeFogCol, FragColor.rgb, f);
+        }
     }
+
 }
 )";
 
@@ -331,23 +391,34 @@ void ViewerGraphics::RenderFrame(int fbW, int fbH, int winW, int winH, const glm
     } else {
         // --- GPU Hardware Acceleration Pass (OpenGL 3.3 / Metal) ---
         glViewport(0, 0, fbW, fbH);
-        glClearColor(state.skyColorBot[0], state.skyColorBot[1], state.skyColorBot[2], 1.0f);
+        if (state.enableFog) {
+            glClearColor(state.fogColor[0], state.fogColor[1], state.fogColor[2], 1.0f);
+        } else {
+            glClearColor(state.skyColorBot[0], state.skyColorBot[1], state.skyColorBot[2], 1.0f);
+        }
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         glEnable(GL_DEPTH_TEST);
 
         // Draw gradient sky before any geometry
         if (state.skyGradient) {
-        glDisable(GL_DEPTH_TEST);
-        glDepthMask(GL_FALSE);
-        glUseProgram(skyProg);
-        glUniform3fv(glGetUniformLocation(skyProg, "skyTop"), 1, state.skyColorTop);
-        glUniform3fv(glGetUniformLocation(skyProg, "skyBot"), 1, state.skyColorBot);
-        glBindVertexArray(skyVao);
-        glDrawArrays(GL_TRIANGLES, 0, 6);
-        glBindVertexArray(0);
-        glDepthMask(GL_TRUE);
-        glEnable(GL_DEPTH_TEST);
+            glDisable(GL_DEPTH_TEST);
+            glDepthMask(GL_FALSE);
+            glUseProgram(skyProg);
+            if (state.enableFog) {
+                glUniform3fv(glGetUniformLocation(skyProg, "skyTop"), 1, state.fogColor);
+                glUniform3fv(glGetUniformLocation(skyProg, "skyBot"), 1, state.fogColor);
+            } else {
+                glUniform3fv(glGetUniformLocation(skyProg, "skyTop"), 1, state.skyColorTop);
+                glUniform3fv(glGetUniformLocation(skyProg, "skyBot"), 1, state.skyColorBot);
+            }
+
+            glBindVertexArray(skyVao);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+            glBindVertexArray(0);
+            glDepthMask(GL_TRUE);
+            glEnable(GL_DEPTH_TEST);
         }
+
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
@@ -390,8 +461,33 @@ void ViewerGraphics::RenderFrame(int fbW, int fbH, int winW, int winH, const glm
             }
         }
 
+        // Upload Fog uniforms
+        glUniform1i(glGetUniformLocation(p, "enableFog"), state.enableFog ? 1 : 0);
+        glUniform3fv(glGetUniformLocation(p, "fogColor"), 1, state.fogColor);
+        glUniform1f(glGetUniformLocation(p, "fogStart"), state.fogStart);
+        glUniform1f(glGetUniformLocation(p, "fogEnd"), state.fogEnd);
+        glUniform1f(glGetUniformLocation(p, "fogDensity"), state.fogDensity);
+        glUniform1i(glGetUniformLocation(p, "fogMode"), state.fogMode);
+        glUniform3f(glGetUniformLocation(p, "viewDir"), viewDir.x, viewDir.y, viewDir.z);
+
+        static float s_engineTime = 0.0f;
+        s_engineTime += ImGui::GetIO().DeltaTime;
+        glUniform1f(glGetUniformLocation(p, "time"), s_engineTime);
+
+        // Upload Flashlight uniforms (SH2/SH3 style spotlight)
+        glUniform1i(glGetUniformLocation(p, "enableFlashlight"), state.enableFlashlight ? 1 : 0);
+        glUniform3fv(glGetUniformLocation(p, "flashlightPos"), 1, glm::value_ptr(state.flashlightPos));
+        glUniform3fv(glGetUniformLocation(p, "flashlightDir"), 1, glm::value_ptr(state.flashlightDir));
+        glUniform3fv(glGetUniformLocation(p, "flashlightColor"), 1, glm::value_ptr(state.flashlightColor));
+        glUniform1f(glGetUniformLocation(p, "flashlightRange"), state.flashlightRange);
+        glUniform1f(glGetUniformLocation(p, "flashlightInnerAngle"), state.flashlightInnerAngle);
+        glUniform1f(glGetUniformLocation(p, "flashlightOuterAngle"), state.flashlightOuterAngle);
+
         const GLint uM     = glGetUniformLocation(p, "m");
+
+
         const GLint uModel  = glGetUniformLocation(p, "model");
+
 
         // Advance animation time for all objects playing a clip
         static size_t s_lastLoadChunkCount = 0;
@@ -523,8 +619,10 @@ void ViewerGraphics::RenderFrame(int fbW, int fbH, int winW, int winH, const glm
             // to express -- subtractive, used by the blood decals,
             // two of which spell SUB in the texture name.
             const uint32_t blend = chunk.blendMode & 0xFFFF;
-            const bool addNow = (blend == 1);
+            const bool addNow = (blend == 1) || chunk.additive || (chunk.texName.rfind("FX_light", 0) == 0) || (chunk.texName.rfind("FX_Flare", 0) == 0);
             const bool subNow = (blend == 2);
+
+
 
             glUniform1i(uAdd, addNow ? 1 : 0);
             glUniform1i(uUnlit, chunk.unlitGeometry ? 1 : 0);

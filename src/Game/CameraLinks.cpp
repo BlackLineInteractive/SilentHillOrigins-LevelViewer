@@ -81,24 +81,42 @@ std::vector<CameraSwitch> BuildCameraSwitches(
   for (const GameObject &go : objects) {
     // The class is spelled without a leading C in the archive, unlike most
     // others -- "PlaneTrigger", not "CPlaneTrigger".
-    if (go.className != "PlaneTrigger")
+    if (go.className != "PlaneTrigger" && go.className != "CPlaneTrigger")
       continue;
-    // A trigger that names no camera is one of the other PlaneTrigger uses
-    // (Ghost Rider has FillInMessage overloads for several), not a camera cut.
-    if (go.objName.empty() || go.linkNames.empty())
+    if (go.objName.empty() && go.linkNames.empty())
       continue;
 
     CameraSwitch sw;
     sw.position = go.position;
     sw.transform = go.transform;
-    sw.nameA = go.objName;
-    sw.nameB = go.linkNames.front();
-    sw.cameraA = FindCameraByName(cameras, sw.nameA);
-    sw.cameraB = FindCameraByName(cameras, sw.nameB);
-    out.push_back(std::move(sw));
+
+    int camA = -1, camB = -1;
+    std::string nameA, nameB;
+
+    if (go.linkNames.size() >= 2) {
+      nameA = go.linkNames[0];
+      nameB = go.linkNames[1];
+      camA = FindCameraByName(cameras, nameA);
+      camB = FindCameraByName(cameras, nameB);
+    }
+    if (camA < 0 || camB < 0) {
+      int directA = FindCameraByName(cameras, go.objName);
+      int directB = go.linkNames.empty() ? -1 : FindCameraByName(cameras, go.linkNames.front());
+      if (directA >= 0) { camA = directA; nameA = go.objName; }
+      if (directB >= 0) { camB = directB; nameB = go.linkNames.front(); }
+    }
+
+    if (camA >= 0 || camB >= 0) {
+      sw.nameA = nameA;
+      sw.nameB = nameB;
+      sw.cameraA = (camA >= 0) ? camA : camB;
+      sw.cameraB = (camB >= 0) ? camB : camA;
+      out.push_back(std::move(sw));
+    }
   }
   return out;
 }
+
 
 void CameraSwitcher::Reset(std::vector<CameraSwitch> switches) {
     m_switches = std::move(switches);

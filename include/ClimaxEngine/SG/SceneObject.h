@@ -72,6 +72,16 @@ public:
     Skeleton skeleton;
     AnimClip animClip;
     float animTime = 0.0f;
+    
+    // Animation crossfading / blending
+    AnimClip prevClip;
+    float prevAnimTime = 0.0f;
+    float blendWeight = 1.0f;
+    float blendDuration = 0.22f;
+
+    void CrossfadeTo(const AnimClip& newClip, float duration = 0.22f);
+    void AdvanceTime(float dt);
+
     std::vector<glm::mat4> currentBoneMats;
     // The rest pose alongside the animated one. An attachment -- a head that
     // is its own clump -- needs both to work out the delta its parent bone
@@ -80,6 +90,7 @@ public:
     
     void SetMatrixAndDraw(const RenderContext& ctx, MeshChunk* mesh) override;
 };
+
 
 class CSceneObjectRegistrar {
 public:
