@@ -35,6 +35,7 @@
 #include "ClimaxEngine/Render/ViewerState.h"
 #include "ClimaxEngine/Render/PlayerModel.h"
 #include "ClimaxEngine/Game/CharacterController.h"
+#include "ClimaxEngine/Game/PlayMain.h"
 #include "ClimaxEngine/Game/CameraLinks.h"
 #include "ClimaxEngine/Game/ZoneLinks.h"
 #include "ClimaxEngine/Game/ButtonTriggers.h"
@@ -309,47 +310,81 @@ public:
 
 
 int main(int argc, char** argv) {
+    std::string arcPath = "game-iso/SHO/SH.ARC";
+    std::string currentLevelName = "IntroRoad";
+
+    // --level <name> skips the front end and drops straight into a room. It is
+    // for working on the level, not for playing: the retail path is the boot
+    // sequence, and that is what happens with no arguments.
+    bool skipFrontEnd = false;
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--level" && i + 1 < argc) {
+            currentLevelName = argv[++i];
+            skipFrontEnd = true;
+        } else if (a.size() > 4 && a.substr(a.size() - 4) == ".arc") {
+            arcPath = a;
+        }
+    }
+
+    SDL_Window* window = nullptr;
+    SDL_GLContext glContext = nullptr;
+
+    // ── the front end ───────────────────────────────────────────────────────
+    //
+    // Splash, language, memory card, aspect, the logo movie, the main menu,
+    // and on a new game the intro clip and the scene queue -- all of it read
+    // out of SLES_551.47 (docs/TODO.md sections 6c-6f). It hands back the
+    // window it has been drawing into once the queue reaches its handover
+    // command, so the level comes up on the same window rather than on a
+    // second one.
+    if (!skipFrontEnd) {
+        ClimaxEngine::Game::FrontEndExit fe;
+        const int rc = ClimaxEngine::Game::RunFrontEnd(argc, argv, fe);
+        if (rc != 0)
+            return rc;
+        if (!fe.startGame)
+            return 0;   // quit out of the menu
+        window = fe.window;
+        glContext = fe.context;
+        if (!fe.firstScene.empty())
+            currentLevelName = fe.firstScene;
+        if (!fe.archive.empty())
+            arcPath = fe.archive;
+    }
+
     std::cout << "========================================" << std::endl;
     std::cout << "Silent Hill: Origins - Native Port Runner" << std::endl;
     std::cout << "========================================" << std::endl;
 
-    std::string arcPath = "game-iso/SHO/SH.ARC";
-    std::string currentLevelName = "IntroRoad";
-
-    if (argc >= 2) {
-        std::string arg1 = argv[1];
-        if (arg1.size() > 4 && arg1.substr(arg1.size() - 4) == ".arc") {
-            arcPath = arg1;
-            if (argc >= 3) currentLevelName = argv[2];
-        } else {
-            currentLevelName = arg1;
-        }
-    }
-
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) {
-        std::cerr << "[ERROR] SDL_Init failed: " << SDL_GetError() << std::endl;
-        return 1;
-    }
-
-    IMG_Init(IMG_INIT_JPG | IMG_INIT_PNG);
-
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-
-    SDL_Window* window = SDL_CreateWindow(
-        "Silent Hill: Origins (SHO-port Native)",
-        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-        1280, 720,
-        SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI
-    );
-
     if (!window) {
-        std::cerr << "[ERROR] SDL_CreateWindow failed: " << SDL_GetError() << std::endl;
-        return 1;
+        if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) {
+            std::cerr << "[ERROR] SDL_Init failed: " << SDL_GetError() << std::endl;
+            return 1;
+        }
+
+        IMG_Init(IMG_INIT_JPG | IMG_INIT_PNG);
+
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+
+        window = SDL_CreateWindow(
+            "Silent Hill: Origins",
+            SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+            1280, 720,
+            SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI
+        );
+
+        if (!window) {
+            std::cerr << "[ERROR] SDL_CreateWindow failed: " << SDL_GetError() << std::endl;
+            return 1;
+        }
+
+        glContext = SDL_GL_CreateContext(window);
     }
 
-    SDL_GLContext glContext = SDL_GL_CreateContext(window);
+    SDL_GL_MakeCurrent(window, glContext);
     SDL_GL_SetSwapInterval(1); // VSync
 
     glewExperimental = GL_TRUE;

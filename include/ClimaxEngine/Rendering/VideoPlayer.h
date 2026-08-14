@@ -4,7 +4,7 @@
 // into a GL texture.
 //
 // Platform code, not core and not game: it links FFmpeg and OpenGL, so it lives
-// only in climax-play (and could live in the toolkit too, but nothing there
+// only in sho-game (and could live in the toolkit too, but nothing there
 // asks for it yet). Game/FrontEnd.h knows a video is playing only through
 // MenuInput::mediaEnded, which the caller sets from Finished() here -- the
 // front-end state machine has no idea what a codec is.
@@ -34,7 +34,7 @@ public:
     VideoPlayer &operator=(const VideoPlayer &) = delete;
 
     // Opens `path` and seeks to the start. False on any failure -- missing
-    // file, no video stream, codec climax-play was not built with. The caller
+    // file, no video stream, codec sho-game was not built with. The caller
     // is expected to fall back to a static image or a plain colour.
     bool Open(const std::string &path);
     void Close();

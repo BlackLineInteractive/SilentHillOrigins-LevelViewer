@@ -75,7 +75,7 @@ else()
     set(SHO_SDL2_TARGETS ${SDL2_LIBRARIES})
 endif()
 
-# SDL2_image: for JPEG decoding in climax-play (Startup container backgrounds).
+# SDL2_image: for JPEG decoding in the front end (Startup container backgrounds).
 find_package(SDL2_image CONFIG QUIET)
 if(TARGET SDL2_image::SDL2_image)
     set(SHO_SDL2_IMAGE SDL2_image::SDL2_image)
@@ -93,7 +93,7 @@ else()
 endif()
 
 # FFmpeg's libav*: decodes the boot/menu movies (converted to MP4 by
-# tools/convert_movies.py) for climax-play. Optional -- without it the video
+# tools/convert_movies.py) for sho-game. Optional -- without it the video
 # stages fall back to a plain colour, they do not fail to build.
 find_package(PkgConfig QUIET)
 set(SHO_HAVE_FFMPEG FALSE)
@@ -272,54 +272,16 @@ target_link_libraries(ClimaxGameEngineToolkit
     ${EXTRA_LIBS}
 )
 
-# ── climax-play  (port exe, NO ImGui) ─────────────────────────────────────────
-# Enforcement: if anyone adds #include "imgui.h" to game/core code,
-# this target will fail to link — making the violation a build error.
-option(BUILD_CLIMAX_PLAY "Build the game target, without the toolkit" ON)
-if(BUILD_CLIMAX_PLAY)
-    # Only its own main, plus the two libraries. The toolkit's renderer is not
-    # here: it is bound to ViewerState and to ImGui, and dragging it in would
-    # defeat the point of this target.
-    # The world loader. None of these pull in ImGui -- checked, not assumed --
-    # so the game can link the same code the toolkit uses instead of the level
-    # renderer living only inside the editor.
-    set(CLIMAX_PLAY_SOURCES
-        src/play_main.cpp
-        src/Platform/PS2/RwsAudio.cpp
-        src/Core/Common.cpp
-        src/Loader/Loader.cpp
-        src/Loader/GeometryDecoder.cpp
-        src/Loader/ResourceLoader.cpp
-        src/SG/SceneObject.cpp
-        src/Rendering/GPUMesh.cpp
-        src/Platform/Wii/WiiTexture.cpp
-        src/Rendering/GLTextureSink.cpp)
-    if(SHO_HAVE_FFMPEG)
-        list(APPEND CLIMAX_PLAY_SOURCES src/Rendering/VideoPlayer.cpp)
-    endif()
-    add_executable(climax-play ${CLIMAX_PLAY_SOURCES})
-    target_link_libraries(climax-play
-        climax-game
-        OpenGL::GL GLEW::GLEW
-        ${SHO_SDL2_TARGETS}
-        ${SHO_SDL2_IMAGE}
-        ${EXTRA_LIBS}
-    )
-    if(SDL2_INCLUDE_DIRS)
-        target_include_directories(climax-play PRIVATE ${SDL2_INCLUDE_DIRS})
-    endif()
-    if(SHO_HAVE_FFMPEG)
-        target_include_directories(climax-play PRIVATE ${FFMPEG_INCLUDE_DIRS})
-        target_link_directories(climax-play PRIVATE ${FFMPEG_LIBRARY_DIRS})
-        target_link_libraries(climax-play ${FFMPEG_LIBRARIES})
-        target_compile_definitions(climax-play PRIVATE CLIMAX_HAVE_FFMPEG=1)
-    else()
-        message(STATUS "libavformat/libavcodec/libswscale not found: climax-play will build without movie playback")
-    endif()
-    # Explicit sentinel: any accidental imgui include will cause an
-    # undefined-symbol error at link time.
-    target_compile_definitions(climax-play PRIVATE CLIMAX_NO_IMGUI=1)
-endif()
+# ── the game ──────────────────────────────────────────────────────────────────
+# There used to be a second executable here, `climax-play`, holding the boot
+# sequence and the menu while `sho-game` held the level. They are one game, so
+# they are now one target: SHO-port/CMakeLists.txt builds `sho-game` out of
+# both halves, and `src/play_main.cpp` is its front end rather than its own
+# `main`.
+#
+# What the split was really enforcing -- that the game code takes no ImGui
+# dependency -- is kept, and kept where it belongs: `climax-game` above links
+# neither SDL nor GL, so an ImGui include in it is a build error on its own.
 
 # Expose the exact RW version the SHO PS2 binary uses as a compile definition
 # so that any translation unit can reference it with SHO_RW_VERSION.

@@ -1,5 +1,6 @@
 #include "SHO/Actor/PlayerBehaviour.h"
 #include "SHO/Camera/CameraManager.h"
+#include "SHO/Core/EventManager.h"
 #include <algorithm>
 #include <cmath>
 
@@ -27,18 +28,99 @@ void PlayerBehaviour::OnEvent(const Core::Msg& msg) {
     }
 }
 
+void PlayerBehaviour::StartGrapple(Actor* enemy) {
+    m_state = PlayerState::Grappled;
+    m_grappler = enemy;
+    m_grappleProgress = 0.0f;
+    m_grappleTimer = 3.5f; // 3.5 seconds to escape
+    Core::EventManager::GetInstance().SendMsg("QTEGrappleStarted", this);
+}
+
+bool PlayerBehaviour::UpdateGrappleQTE(float dt, bool buttonPressed) {
+    if (m_state != PlayerState::Grappled) return false;
+
+    if (buttonPressed) {
+        m_grappleProgress += 0.20f; // Each mash adds 20%
+    }
+
+    // Natural decay over time
+    m_grappleProgress = std::max(0.0f, m_grappleProgress - 0.15f * dt);
+    m_grappleTimer -= dt;
+
+    if (m_grappleProgress >= 1.0f) {
+        BreakFreeFromGrapple();
+        return true;
+    }
+
+    if (m_grappleTimer <= 0.0f) {
+        // Failed struggle: take grapple bite damage
+        TakeDamage(25.0f, GetForward() * -1.0f);
+        m_state = PlayerState::Idle;
+        m_grappler = nullptr;
+        Core::EventManager::GetInstance().SendMsg("QTEGrappleFailed", this);
+        return false;
+    }
+
+    return false;
+}
+
+void PlayerBehaviour::BreakFreeFromGrapple() {
+    m_state = PlayerState::Idle;
+    if (m_grappler) {
+        // Push grappler back and stagger it
+        m_grappler->TakeDamage(10.0f, GetForward());
+        m_grappler = nullptr;
+    }
+    Core::EventManager::GetInstance().SendMsg("QTEGrappleEscaped", this);
+}
+
+void PlayerBehaviour::UpdateThreat(const std::vector<Actor*>& enemies) {
+    float maxStatic = 0.0f;
+    const float radioMaxRadius = 12.0f;
+    Core::Vec3 myPos = GetPosition();
+
+    for (auto* enemy : enemies) {
+        if (!enemy || !enemy->IsAlive()) continue;
+
+        float dist = glm::distance(myPos, enemy->GetPosition());
+        if (dist < radioMaxRadius) {
+            float s = 1.0f - (dist / radioMaxRadius);
+            if (s > maxStatic) {
+                maxStatic = s;
+            }
+        }
+    }
+
+    m_radioStatic = maxStatic;
+}
+
 void PlayerBehaviour::HandleMovement(float dt) {
     if (!IsAlive()) {
         m_state = PlayerState::Dead;
         return;
     }
 
+    if (m_state == PlayerState::Grappled) {
+        return;
+    }
+
+    // Stamina recovery when not running
     float stickMag = std::sqrt(m_stickX * m_stickX + m_stickY * m_stickY);
     if (stickMag < 0.15f) {
-        // Stick released: clear direction latch
         m_isDirectionLatched = false;
         m_latchedMoveDir = Core::Vec3(0.0f);
-        m_state = PlayerState::Idle;
+
+        // Regenerate stamina faster while standing still
+        m_stamina = std::min(m_maxStamina, m_stamina + 35.0f * dt);
+        if (m_stamina > 25.0f) {
+            m_isExhausted = false;
+        }
+
+        if (m_isExhausted) {
+            m_state = PlayerState::Exhausted;
+        } else {
+            m_state = PlayerState::Idle;
+        }
         return;
     }
 
@@ -71,17 +153,33 @@ void PlayerBehaviour::HandleMovement(float dt) {
         m_latchedMoveDir = moveDir;
     }
 
-    // Determine running vs walking based on Square button or analog stick push
-    bool isRunning = Core::HasFlag(m_buttons, Core::PadButton::Square) || stickMag > 0.85f;
-    if (isRunning && m_stamina > 5.0f) {
+    // Determine running vs walking based on Square button and stamina state
+    bool runRequested = Core::HasFlag(m_buttons, Core::PadButton::Square) || stickMag > 0.85f;
+    if (runRequested && !m_isExhausted && m_stamina > 5.0f) {
         m_state = PlayerState::Run;
         m_stamina = std::max(0.0f, m_stamina - 15.0f * dt);
+        if (m_stamina <= 0.0f) {
+            m_isExhausted = true;
+        }
     } else {
-        m_state = PlayerState::Walk;
+        if (m_isExhausted) {
+            m_state = PlayerState::Exhausted;
+        } else {
+            m_state = PlayerState::Walk;
+        }
         m_stamina = std::min(m_maxStamina, m_stamina + 20.0f * dt);
+        if (m_stamina > 25.0f) {
+            m_isExhausted = false;
+        }
     }
 
-    float speed = (m_state == PlayerState::Run) ? m_runSpeed : m_walkSpeed;
+    float speed = m_walkSpeed;
+    if (m_state == PlayerState::Run) {
+        speed = m_runSpeed;
+    } else if (m_state == PlayerState::Exhausted) {
+        speed = m_walkSpeed * 0.6f; // Slow down during exhaustion
+    }
+
     Core::Vec3 displacement = moveDir * (speed * dt);
 
     // Update facing orientation

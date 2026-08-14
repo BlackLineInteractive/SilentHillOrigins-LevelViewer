@@ -20,7 +20,24 @@ Opens proprietary Climax Engine container files (no file extension — named lik
 
 ## Playing it
 
-Open `SH.ARC`, load a hospital level, tick **Walk (collision)**.
+There are two ways in, because there are two programs.
+
+`sho-game` is the port. Run it with no arguments and it boots the way the disc
+does — the splash, the language and aspect screens, the logo movie, the main
+menu, the intro clip, and then the first room:
+
+```
+sho-game [path/to/SH.ARC]
+sho-game --level HO_1_Lobby      # skip the front end, open one room
+```
+
+None of that sequence is invented. The order of the boot records, which screen
+is skippable, the five flags and their order, the button mask the pad is read
+through — all of it is transcribed out of `SLES_551.47`; `docs/TODO.md` §6c–6f
+records where each piece came from.
+
+`ClimaxGameEngineToolkit` is the viewer. Open `SH.ARC`, load a hospital level,
+tick **Walk (collision)**.
 
 | | |
 |---|---|
@@ -44,9 +61,22 @@ Nothing in this list is hand-authored; each is read out of the shipped data.
 - **Collision.** The level's own `CBSP` mesh, with sliding and ground snapping.
 - **Travis.** Model, textures, face, and his own animation set — idle, walk and run picked out by their authored filenames (`PC_TG_Walk.anm`).
 
+- **The boot sequence and the menu.** Splash, language, aspect, logo movie,
+  main menu, intro clip — read out of the executable rather than guessed at,
+  down to which screen can be skipped and which cannot.
+
 ### What it does not do yet
 
-Menus and the boot sequence, saves, inventory, combat, enemies, facial animation (`rwID_DMORPHANIMATION` — a morph system the toolkit does not implement), and localisation. Some trigger volumes are the wrong size, which needs the executable read rather than guessed at.
+Saves, inventory, combat, enemies, facial animation (`rwID_DMORPHANIMATION` — a
+morph system the toolkit does not implement), and localisation beyond the string
+table. Some trigger volumes are the wrong size, which needs the executable read
+rather than guessed at.
+
+The gameplay systems above the level — Travis's state machine, the monsters,
+items — exist in `SHO-port/` as working stand-ins rather than transcriptions,
+and `SHO-port/docs/` says for each one exactly what was recovered from the
+retail build and what is a placeholder. That is the current front line of the
+work.
 
 ---
 
@@ -354,9 +384,10 @@ left-button drag at a time, and the gizmo only appears once a level is loaded.
 
 ## Project Structure
 
-The build produces four separate targets. The boundary is enforced by the
-linker: `climax-core` and `climax-game` have no GL/SDL/ImGui symbols, so
-any accidental include causes a link error instead of a silent violation.
+The build produces two executables and three libraries. The boundary is
+enforced by the linker: `climax-core` and `climax-game` have no GL/SDL/ImGui
+symbols, so any accidental include causes a link error instead of a silent
+violation.
 
 ```
 climax-core   (static library — no GL, no SDL, no ImGui)
@@ -387,9 +418,16 @@ ClimaxGameEngineToolkit  (executable — SDL + GL + ImGui; links climax-game)
   src/Platform/Wii/WiiTexture.cpp        — GX texture decoder (GPU upload)
   src/Rendering/…                        — GL/Metal backend, GPU mesh, player model
 
-climax-play   (executable — SDL + GL, NO ImGui; links climax-game)
-  src/play_main.cpp                      — boot UI, menu renderer, menu music
-  src/Platform/PS2/RwsAudio.cpp          — SDL audio device (shared source)
+sho-port   (static library — no GL, no SDL, no ImGui; links climax-game)
+  SHO-port/src/Actor/                    — Travis, the monsters
+  SHO-port/src/Combat/, Inventory/       — weapons, items
+  SHO-port/src/Triggers/, Puzzle/        — level logic and the ten puzzles
+  SHO-port/src/World/, Camera/, Audio/   — world, cameras, sound
+  SHO-port/include/SHO/Core/EventIds.h   — the 206 message names, generated
+
+sho-game   (executable — the game; SDL + GL; links sho-port)
+  src/play_main.cpp                      — the front end: boot, menu, intro
+  SHO-port/src/Main.cpp                  — the level, from the handover onward
   src/Rendering/VideoPlayer.cpp          — FFmpeg-based FMV player (optional)
 
 vendor/   (Makefile build only — CMake fetches into build/_deps/)

@@ -63,9 +63,16 @@ target_link_libraries(sho-port PUBLIC climax-game glm::glm)
 add_executable(test_sho_port tests/test_sho_port.cpp)
 target_link_libraries(test_sho_port PRIVATE sho-port)
 
-# ── Standalone Native Port Game Runner ───────────────────────────────────────
+# ── sho-game: the whole game, in one executable ──────────────────────────────
+#
+# Two halves that used to be two targets. `play_main.cpp` is the front end --
+# splash, language, aspect, the logo movie, the main menu, the intro clip and
+# the scene queue, all transcribed from SLES_551.47 -- and `Main.cpp` takes
+# over at the queue's handover command and runs the level. One window, one
+# process. See include/ClimaxEngine/Game/PlayMain.h.
 set(SHO_GAME_SOURCES
     src/Main.cpp
+    ${CMAKE_SOURCE_DIR}/src/play_main.cpp
     ${CMAKE_SOURCE_DIR}/src/Viewer/ViewerGraphics.cpp
     ${CMAKE_SOURCE_DIR}/src/Viewer/ViewerDraw.cpp
     ${CMAKE_SOURCE_DIR}/src/Viewer/ViewerAudio.cpp
@@ -91,6 +98,11 @@ set(SHO_GAME_SOURCES
 if(APPLE)
     list(APPEND SHO_GAME_SOURCES ${CMAKE_SOURCE_DIR}/src/Rendering/MetalBackend.mm)
 endif()
+# The boot movies and the intro. Optional at configure time: without it the
+# front end still runs, it just says so instead of drawing an invented logo.
+if(SHO_HAVE_FFMPEG)
+    list(APPEND SHO_GAME_SOURCES ${CMAKE_SOURCE_DIR}/src/Rendering/VideoPlayer.cpp)
+endif()
 
 add_executable(sho-game ${SHO_GAME_SOURCES})
 
@@ -114,4 +126,17 @@ target_link_libraries(sho-game PRIVATE
     ${SHO_SDL2_IMAGE}
     ${EXTRA_LIBS}
 )
+
+if(SDL2_INCLUDE_DIRS)
+    target_include_directories(sho-game PRIVATE ${SDL2_INCLUDE_DIRS})
+endif()
+
+if(SHO_HAVE_FFMPEG)
+    target_include_directories(sho-game PRIVATE ${FFMPEG_INCLUDE_DIRS})
+    target_link_directories(sho-game PRIVATE ${FFMPEG_LIBRARY_DIRS})
+    target_link_libraries(sho-game PRIVATE ${FFMPEG_LIBRARIES})
+    target_compile_definitions(sho-game PRIVATE CLIMAX_HAVE_FFMPEG=1)
+else()
+    message(STATUS "libavformat/libavcodec/libswscale not found: sho-game will build without movie playback")
+endif()
 

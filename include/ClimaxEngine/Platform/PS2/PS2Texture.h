@@ -14,7 +14,7 @@ void ProcessAndUploadTexture(RawTexture& raw);
 // The decoder used to call glTexImage2D itself, which is why this file could
 // not live in climax-core: a texture decoder has no business knowing what a GPU
 // is. It now hands finished RGBA to whoever registered a sink -- the toolkit
-// installs one that uploads and registers aliases, climax-play installs its
+// installs one that uploads and registers aliases, the front end installs its
 // own, and a headless converter can install none at all.
 //
 // With no sink registered the pixels are simply kept on the RawTexture.

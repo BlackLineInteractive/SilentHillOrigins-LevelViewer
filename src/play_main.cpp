@@ -1,14 +1,18 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// climax-play — the game, without the toolkit.
+// The front end — the first half of the game.
 //
-// This exists to make the boundary real. It links climax-core and climax-game
-// and nothing else of ours; if anyone puts an ImGui include into either, this
-// target stops linking, and the rule stops being a comment in a header.
+// A window, a 2D pass, the boot sequence, and the main menu read out of the
+// retail archive: the four XML screens, their button textures, the string
+// table and the font. What it draws is not a mock-up of the menu; it is the
+// menu, at the coordinates the game ships.
 //
-// It is small on purpose. A window, a 2D pass, the boot sequence, and the main
-// menu read out of the retail archive: the four XML screens, their button
-// textures, the string table and the font. What it draws is not a mock-up of
-// the menu; it is the menu, at the coordinates the game ships.
+// This was `climax-play`, a separate executable, and the split was artificial:
+// the boot sequence, the menu and the level are one game. It is now the front
+// half of `sho-game` and ends where the game's own scene queue says it should,
+// at the handover command. See ClimaxEngine/Game/PlayMain.h.
+//
+// It still takes no ImGui dependency, and neither does anything it calls. That
+// rule now lives in `climax-game`, which links neither SDL nor GL.
 // ─────────────────────────────────────────────────────────────────────────────
 #include <GL/glew.h>
 #include <SDL2/SDL.h>
@@ -30,6 +34,7 @@
 #include "ClimaxEngine/Core/UI/ScreenDef.h"
 #include "ClimaxEngine/Core/UI/StringTable.h"
 #include "ClimaxEngine/Game/FrontEnd.h"
+#include "ClimaxEngine/Game/PlayMain.h"
 #include "ClimaxEngine/Game/SceneQueue.h"
 #include "ClimaxEngine/Game/SceneObjects.h"
 #include "ClimaxEngine/Loader/Loader.h"
@@ -468,7 +473,8 @@ std::string ResolveMoviePath(const std::string &moviesDir,
 
 } // namespace
 
-int main(int argc, char **argv) {
+int ClimaxEngine::Game::RunFrontEnd(int argc, char **argv,
+                                    ClimaxEngine::Game::FrontEndExit &out) {
   const char *arcPath = "game-iso/SHO/SH.ARC";
   std::string moviesDir = "SHO-port/MOVIES"; // tools/convert_movies.py's output
   std::string musicDir = "SHO-port/MUSIC";   // converted MUSIC/*.RWS
@@ -1224,8 +1230,16 @@ int main(int argc, char **argv) {
       bool FreeTemporaries() override { return true; }
       bool ResetSystems() override { return true; }
       bool StartLevelAudio() override { return true; }
+
+      // Where the front end ends. Command 0x0A is FUN_0017B780, and it is the
+      // last node the load sequence pushes -- the point the original hands the
+      // room to the player. The window, the archive and the decoded level stay
+      // up; the caller takes over the frame from here.
+      bool *handedOver = nullptr;
       bool HandOver() override {
           std::fprintf(stderr, "[scene] %s up, control handed over\n", scene.c_str());
+          if (handedOver)
+              *handedOver = true;
           return true;
       }
       bool ResetSubsystems() override {
@@ -1235,6 +1249,8 @@ int main(int argc, char **argv) {
   } sceneHost;
   sceneHost.arc = &arc;
   sceneHost.fade = &introFade;
+  bool handedOver = false;
+  sceneHost.handedOver = &handedOver;
   bool sceneStarted = false;
   // Screen-to-screen inside the menu goes through black too, the same way the
   // menu-to-intro handover does -- just faster, because it is a step sideways
@@ -1511,6 +1527,17 @@ int main(int argc, char **argv) {
     // FUN_00179D60: one drain per frame.
     if (sceneQueue.Busy())
       sceneQueue.Update(sceneHost, dt);
+
+    // The queue reached its handover node. Stop drawing the front end and let
+    // the caller run the level on the window this loop has been using.
+    if (handedOver) {
+      out.startGame = true;
+      out.firstScene = sceneHost.scene;
+      out.archive = arcPath;
+      out.widescreen = host.displayMode != 0;
+      out.language = host.language;
+      run = false;
+    }
 
     glViewport(0, 0, w, h);
     glClearColor(0.02f, 0.02f, 0.03f, 1.0f);
@@ -2008,6 +2035,16 @@ int main(int argc, char **argv) {
       if (surf) SDL_FreeSurface(surf);
       run = false;
     }
+  }
+
+  // Handing over: the window, the context and SDL itself stay up, and the
+  // caller keeps drawing into them. Tearing them down here and building a
+  // second window is what makes a port feel like two programs stitched
+  // together, which is exactly what this is not any more.
+  if (out.startGame) {
+    out.window = win;
+    out.context = ctx;
+    return 0;
   }
 
   SDL_GL_DeleteContext(ctx);

@@ -2,6 +2,7 @@
 
 #include "SHO/Actor/Actor.h"
 #include "SHO/Actor/CharacterController.h"
+#include <vector>
 
 namespace SHO {
 namespace Actor {
@@ -10,9 +11,12 @@ enum class PlayerState {
     Idle,
     Walk,
     Run,
+    Exhausted,
     TurnInPlace,
-    Aim,
+    AimMelee,
+    AimRanged,
     Attack,
+    Grappled,
     Interact,
     Hurt,
     Dead
@@ -43,6 +47,18 @@ public:
 
     float GetStamina() const { return m_stamina; }
     float GetMaxStamina() const { return m_maxStamina; }
+    bool  IsExhausted() const { return m_isExhausted; }
+
+    // Threat / Pocket Radio Static (cThreatController)
+    float GetRadioStatic() const { return m_radioStatic; }
+    void UpdateThreat(const std::vector<Actor*>& enemies);
+
+    // QTE Grapple Struggle (CFMAController)
+    bool IsGrappled() const { return m_state == PlayerState::Grappled; }
+    void StartGrapple(Actor* enemy);
+    bool UpdateGrappleQTE(float dt, bool buttonPressed);
+    void BreakFreeFromGrapple();
+    float GetGrappleMeter() const { return m_grappleProgress; }
 
     CharacterController& GetController() { return m_controller; }
 
@@ -63,7 +79,16 @@ private:
 
     float m_stamina = 100.0f;
     float m_maxStamina = 100.0f;
+    bool  m_isExhausted = false;
     bool  m_flashlightOn = true;
+
+    // Threat & radio
+    float m_radioStatic = 0.0f;
+
+    // Grapple QTE
+    Actor* m_grappler = nullptr;
+    float  m_grappleProgress = 0.0f;
+    float  m_grappleTimer = 0.0f;
 
     // Direction latch: holds world move vector across camera cuts until stick is released
     bool       m_isDirectionLatched = false;

@@ -26,6 +26,7 @@ differently.
 | file | covers |
 |---|---|
 | [EXECUTABLES.md](executables/EXECUTABLES.md) | how the binaries are read, and what has been recovered from them |
+| [MESSAGES.md](executables/MESSAGES.md) | the 206 RWS message names, how they were recovered, and what the player links to |
 | [SLES_GhostRider_Analysis.md](executables/SLES_GhostRider_Analysis.md) | Ghost Rider's binary — unstripped, so it is the primary source of truth for engine behaviour |
 | [IRX_RWA.md](executables/IRX_RWA.md), [IRX_RTFSSIOP.md](executables/IRX_RTFSSIOP.md) | the IOP modules |
 | Sony Modules/ | reference material for the stock Sony IRX modules |
@@ -47,6 +48,7 @@ Machine output. Each file has one producer; to refresh it, run that command.
 | `sho_behaviour.json` | `python3 tools/sho_behaviour.py` |
 | `property_observations.json` | `python3 tools/property_observations.py game-iso/SHO/SH.ARC --json docs/generated/property_observations.json` |
 | `port_class_map.json` | `python3 tools/merge_port_map.py` — merges the attribute maps with the observations |
+| `sho_event_ids.json` | `python3 tools/event_ids.py` — also emits `SHO-port/include/SHO/Core/EventIds.h` |
 | `sho_class_registry.json` | the class list read out of the archive's type directory |
 | `GR_symbols.txt` | `nm` over Ghost Rider's binary |
 
@@ -67,6 +69,7 @@ None of them are needed to build or run the toolkit.
 | `attrmap.py`, `sho_attrs.py`, `sho_behaviour.py` | recover class property tables from the binaries |
 | `property_observations.py` | describes each property from the shipped data rather than the code |
 | `merge_port_map.py`, `sho_port_gen.py` | merge the above and emit port headers |
+| `event_ids.py` | recovers the RWS message names from the decompiled tree — see [MESSAGES.md](executables/MESSAGES.md) |
 | `mips.py`, `sles.py` | the MIPS disassembler and ELF reader the others build on |
 | `dump_prototype.py`, `extract_eboot_strings.py` | the 2006 PSP prototype |
 | `Ghidra*.java` | headless Ghidra scripts (Java, not Python — the install has no PyGhidra) |
